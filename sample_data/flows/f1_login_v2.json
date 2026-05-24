@@ -1,0 +1,16 @@
+{
+  "flow_id": "f1",
+  "title": "User Login",
+  "story_id": "US1",
+  "description": "User authenticates using OTP sent to mobile number — no password",
+  "features_used": ["Login", "OTPService"],
+  "depends_on": [],
+  "steps": [
+    "User opens the Airtel app",
+    "User enters mobile number (MSISDN)",
+    "System sends OTP to registered mobile number",
+    "User enters the 6-digit OTP",
+    "System calls POST /auth/login with otp field",
+    "System validates OTP and returns session token on success"
+  ]
+}

@@ -1,0 +1,6 @@
+{
+  "feature_id": "PlanFetch",
+  "name": "PlanFetch",
+  "description": "Fetches current and recommended plans using a single parameterized API",
+  "apis_used": ["/plans"]
+}

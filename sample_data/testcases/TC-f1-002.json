@@ -1,0 +1,12 @@
+{
+  "tc_id": "TC-f1-002",
+  "flow_id": "f1",
+  "title": "Login with wrong password",
+  "type": "negative",
+  "steps": [
+    "Enter valid MSISDN: 9876543210",
+    "Enter incorrect password: wrongpass123",
+    "Submit login form"
+  ],
+  "expected_result": "HTTP 401 — error message: Invalid credentials, login blocked"
+}

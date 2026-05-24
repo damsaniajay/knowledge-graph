@@ -1,0 +1,129 @@
+openapi: "3.0.0"
+info:
+  title: Airtel Plan Change API
+  version: "1.0.0"
+paths:
+  /auth/login:
+    post:
+      summary: Authenticate user and return session token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [msisdn, password]
+              properties:
+                msisdn:   { type: string }
+                password: { type: string }
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:   { type: string }
+                  user_id: { type: string }
+        "401":
+          description: Invalid credentials
+
+  /auth/token/refresh:
+    post:
+      summary: Refresh session token
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: Token refreshed
+
+  /plans:
+    get:
+      summary: Fetch plans — current or recommended (parameterized)
+      parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum: [current, recommended]
+          required: true
+        - name: msisdn
+          in: query
+          schema:
+            type: string
+          required: true
+      responses:
+        "200":
+          description: Plans list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  plans: { type: array }
+
+  /plans/switch:
+    post:
+      summary: Create a plan switch order
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [msisdn, plan_id]
+              properties:
+                msisdn:  { type: string }
+                plan_id: { type: string }
+      responses:
+        "200":
+          description: Order created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  order_id: { type: string }
+        "400":
+          description: Invalid plan
+
+  /payments/pay:
+    post:
+      summary: Process payment for plan switch order
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_id, payment_method, amount]
+              properties:
+                order_id:       { type: string }
+                payment_method: { type: string, enum: [upi, card, wallet] }
+                amount:         { type: number }
+      responses:
+        "200":
+          description: Payment successful
+        "402":
+          description: Payment failed
+
+  /payments/activate:
+    post:
+      summary: Activate new plan after successful payment
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [order_id]
+              properties:
+                order_id: { type: string }
+      responses:
+        "200":
+          description: Plan activated
+        "404":
+          description: Order not found

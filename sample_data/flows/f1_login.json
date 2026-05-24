@@ -1,0 +1,15 @@
+{
+  "flow_id": "f1",
+  "story_id": "US1",
+  "title": "User Login",
+  "description": "User authenticates using mobile number and password",
+  "features_used": ["Login"],
+  "depends_on": [],
+  "steps": [
+    "User opens the Airtel app",
+    "User enters mobile number (MSISDN)",
+    "User enters password",
+    "System calls POST /auth/login",
+    "System returns session token on success"
+  ]
+}

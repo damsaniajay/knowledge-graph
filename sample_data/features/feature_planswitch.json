@@ -1,0 +1,6 @@
+{
+  "feature_id": "PlanSwitch",
+  "name": "PlanSwitch",
+  "description": "Creates a plan switch order for the subscriber",
+  "apis_used": ["/plans/switch"]
+}

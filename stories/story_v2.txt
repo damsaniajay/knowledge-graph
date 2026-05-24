@@ -1,0 +1,66 @@
+Feature: Airtel Prepaid Recharge (v2 — updated with EMI and auto-recharge)
+
+As an Airtel prepaid subscriber, I want to recharge my mobile number online
+so that I can continue using voice and data services without visiting a store.
+
+Background:
+- User must have an active Airtel prepaid SIM
+- User must be logged in to the Airtel Thanks app or web portal
+- Payment gateway (Razorpay) must be available
+
+Functional Requirements:
+
+1. Recharge Initiation
+   The user navigates to the "Recharge" section from the home screen.
+   The system displays the user's registered mobile number pre-filled.
+   The user can change the mobile number to recharge a different Airtel number.
+   The system validates that the entered number is a 10-digit Indian mobile number.
+   [CHANGED] The system now also checks if the number is ported and shows the
+   current operator before allowing recharge.
+
+2. Plan Selection
+   The system fetches and displays available recharge plans from the plan catalog API.
+   Plans are categorised into: Popular, Data Add-ons, Unlimited, International Roaming.
+   Each plan shows: validity, data quota, voice minutes, SMS quota, and price.
+   The user selects a plan. The system highlights the selected plan.
+   The user can use the search bar to filter plans by price range or validity.
+   [CHANGED] Plans above ₹499 now show an EMI option (3/6 months via credit card).
+
+3. Payment
+   After plan selection the user proceeds to the payment screen.
+   Supported payment methods: UPI, Credit/Debit Card, Net Banking, Airtel Money wallet.
+   [CHANGED] BNPL (Buy Now Pay Later) via Airtel Finance is now also supported.
+   The system shows the total amount including applicable taxes.
+   The user enters payment details and confirms.
+   The system calls the payment gateway API and waits for a callback.
+   On successful payment the system triggers the recharge API.
+   [CHANGED] Payment timeout is reduced from 5 minutes to 3 minutes.
+
+4. Recharge Processing
+   The recharge API processes the request and returns a transaction ID.
+   The system polls the recharge status API every 5 seconds for up to 60 seconds.
+   On success: display "Recharge Successful" with transaction ID and new balance.
+   On failure: display error message and offer retry or refund options.
+
+5. Confirmation and History
+   A confirmation SMS is sent to the recharged number.
+   The transaction is added to the user's recharge history.
+   The user can download or share the recharge receipt as PDF.
+
+6. Auto-Recharge Setup  [NEW FLOW]
+   The user can enable auto-recharge for a selected plan.
+   The user chooses a trigger: "3 days before expiry" or "On expiry".
+   The user saves a payment method (UPI VPA or card token) for auto-debit.
+   The system schedules a background job to auto-recharge on the trigger date.
+   The user receives a notification 24 hours before auto-recharge executes.
+   The user can pause or cancel auto-recharge at any time from the settings screen.
+   On auto-recharge failure: notify the user and fall back to manual recharge prompt.
+
+Business Rules:
+- Minimum recharge amount is ₹10; maximum is ₹10,000 per transaction.
+- UPI payments have a per-transaction limit of ₹1 lakh.
+- If the recharge API fails after a successful payment, a refund is auto-initiated within 24 hours.
+- Plans marked "Limited Time" are only valid until the end of the current month.
+- [NEW] EMI option is available only for credit card payments; debit cards are excluded.
+- [NEW] Auto-recharge can only be set up for plans with validity >= 28 days.
+- [CHANGED] Payment timeout reduced from 300 seconds to 180 seconds.

@@ -1,0 +1,49 @@
+Feature: Airtel Prepaid Recharge
+
+As an Airtel prepaid subscriber, I want to recharge my mobile number online
+so that I can continue using voice and data services without visiting a store.
+
+Background:
+- User must have an active Airtel prepaid SIM
+- User must be logged in to the Airtel Thanks app or web portal
+- Payment gateway (Razorpay) must be available
+
+Functional Requirements:
+
+1. Recharge Initiation
+   The user navigates to the "Recharge" section from the home screen.
+   The system displays the user's registered mobile number pre-filled.
+   The user can change the mobile number to recharge a different Airtel number.
+   The system validates that the entered number is a 10-digit Indian mobile number.
+
+2. Plan Selection
+   The system fetches and displays available recharge plans from the plan catalog API.
+   Plans are categorised into: Popular, Data Add-ons, Unlimited, International Roaming.
+   Each plan shows: validity, data quota, voice minutes, SMS quota, and price.
+   The user selects a plan. The system highlights the selected plan.
+   The user can use the search bar to filter plans by price range or validity.
+
+3. Payment
+   After plan selection the user proceeds to the payment screen.
+   Supported payment methods: UPI, Credit/Debit Card, Net Banking, Airtel Money wallet.
+   The system shows the total amount including applicable taxes.
+   The user enters payment details and confirms.
+   The system calls the payment gateway API and waits for a callback.
+   On successful payment the system triggers the recharge API.
+
+4. Recharge Processing
+   The recharge API processes the request and returns a transaction ID.
+   The system polls the recharge status API every 5 seconds for up to 60 seconds.
+   On success: display "Recharge Successful" with transaction ID and new balance.
+   On failure: display error message and offer retry or refund options.
+
+5. Confirmation and History
+   A confirmation SMS is sent to the recharged number.
+   The transaction is added to the user's recharge history.
+   The user can download or share the recharge receipt as PDF.
+
+Business Rules:
+- Minimum recharge amount is ₹10; maximum is ₹10,000 per transaction.
+- UPI payments have a per-transaction limit of ₹1 lakh.
+- If the recharge API fails after a successful payment, a refund is auto-initiated within 24 hours.
+- Plans marked "Limited Time" are only valid until the end of the current month.

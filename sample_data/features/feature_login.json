@@ -1,0 +1,6 @@
+{
+  "feature_id": "Login",
+  "name": "Login",
+  "description": "Authenticates the user and returns a session token",
+  "apis_used": ["/auth/login", "/auth/token/refresh"]
+}

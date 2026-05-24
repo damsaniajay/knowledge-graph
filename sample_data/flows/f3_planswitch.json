@@ -1,0 +1,14 @@
+{
+  "flow_id": "f3",
+  "story_id": "US1",
+  "title": "Switch Plan",
+  "description": "User selects a new plan and creates a switch order",
+  "features_used": ["PlanSwitch"],
+  "depends_on": ["f2"],
+  "steps": [
+    "User selects a recommended plan",
+    "System calls POST /plans/switch with msisdn and plan_id",
+    "System returns order_id on success",
+    "User is shown order confirmation screen"
+  ]
+}

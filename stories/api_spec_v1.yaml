@@ -1,0 +1,200 @@
+openapi: "3.0.0"
+info:
+  title: "Airtel Recharge API"
+  version: "1.0.0"
+  description: "APIs for Airtel prepaid recharge platform"
+
+paths:
+
+  /auth/login:
+    post:
+      summary: "Authenticate user and return access token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  description: "Airtel registered mobile number"
+                password:
+                  type: string
+                  description: "Account password"
+      responses:
+        "200":
+          description: "Login successful"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expires_in:
+                    type: integer
+        "401":
+          description: "Invalid credentials"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "invalid_credentials"
+        "429":
+          description: "Too many login attempts"
+
+  /plans:
+    get:
+      summary: "Get available recharge plans"
+      parameters:
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [popular, data, unlimited, roaming]
+        - name: max_price
+          in: query
+          required: false
+          schema:
+            type: number
+      responses:
+        "200":
+          description: "List of recharge plans"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    plan_id:
+                      type: string
+                    price:
+                      type: number
+                    validity_days:
+                      type: integer
+                    data_gb:
+                      type: number
+                    voice_minutes:
+                      type: integer
+                    category:
+                      type: string
+
+  /recharge/initiate:
+    post:
+      summary: "Initiate a recharge transaction"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile_number, plan_id, payment_method]
+              properties:
+                mobile_number:
+                  type: string
+                  description: "10-digit Indian mobile number"
+                plan_id:
+                  type: string
+                payment_method:
+                  type: string
+                  enum: [upi, card, netbanking, wallet]
+      responses:
+        "200":
+          description: "Recharge initiated successfully"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [pending, processing]
+        "400":
+          description: "Invalid request"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+
+  /recharge/status/{transaction_id}:
+    get:
+      summary: "Poll recharge transaction status"
+      parameters:
+        - name: transaction_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Transaction status"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [pending, processing, success, failed]
+                  message:
+                    type: string
+                  new_balance:
+                    type: number
+        "404":
+          description: "Transaction not found"
+
+  /payment/process:
+    post:
+      summary: "Process payment for a recharge transaction"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_id, payment_details]
+              properties:
+                transaction_id:
+                  type: string
+                payment_details:
+                  type: object
+                  description: "Payment method specific details (UPI VPA, card token, etc.)"
+                timeout_seconds:
+                  type: integer
+                  default: 300
+      responses:
+        "200":
+          description: "Payment processed"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payment_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [success, failed, pending]
+        "400":
+          description: "Payment failed"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  refund_initiated:
+                    type: boolean

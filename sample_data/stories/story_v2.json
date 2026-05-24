@@ -1,0 +1,5 @@
+{
+  "story_id": "US1",
+  "title": "Plan Change",
+  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must login using OTP-based authentication, view existing plan with validity details, browse recommended plans with discount offers, select a new plan, apply a promo code, make payment, and activate the new plan with a confirmation SMS."
+}

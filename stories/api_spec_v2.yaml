@@ -1,0 +1,244 @@
+openapi: "3.0.0"
+info:
+  title: "Airtel Recharge API"
+  version: "2.0.0"
+  description: "APIs for Airtel prepaid recharge platform — v2 with device_id enforcement and auto-recharge"
+
+paths:
+
+  /auth/login:
+    post:
+      summary: "Authenticate user and return access token"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password, device_id]   # CHANGED: device_id now mandatory
+              properties:
+                username:
+                  type: string
+                  description: "Airtel registered mobile number"
+                password:
+                  type: string
+                  description: "Account password"
+                device_id:                               # NEW mandatory field
+                  type: string
+                  description: "Unique device identifier for fraud prevention"
+      responses:
+        "200":
+          description: "Login successful"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token:
+                    type: string
+                  expires_in:
+                    type: integer
+        "400":                                          # NEW: missing device_id error
+          description: "Missing required field"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "missing_device_id"
+        "401":
+          description: "Invalid credentials"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "invalid_credentials"
+        "429":
+          description: "Too many login attempts"
+
+  /plans:
+    get:
+      summary: "Get available recharge plans"
+      parameters:
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [popular, data, unlimited, roaming]
+        - name: max_price
+          in: query
+          required: false
+          schema:
+            type: number
+      responses:
+        "200":
+          description: "List of recharge plans"
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    plan_id:
+                      type: string
+                    price:
+                      type: number
+                    validity_days:
+                      type: integer
+                    data_gb:
+                      type: number
+                    voice_minutes:
+                      type: integer
+                    category:
+                      type: string
+                    emi_available:                      # NEW field
+                      type: boolean
+
+  /recharge/initiate:
+    post:
+      summary: "Initiate a recharge transaction"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile_number, plan_id, payment_method]
+              properties:
+                mobile_number:
+                  type: string
+                plan_id:
+                  type: string
+                payment_method:
+                  type: string
+                  enum: [upi, card, netbanking, wallet, bnpl]  # CHANGED: bnpl added
+      responses:
+        "200":
+          description: "Recharge initiated successfully"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  transaction_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [pending, processing]
+        "400":
+          description: "Invalid request"
+
+  /recharge/status/{transaction_id}:
+    get:
+      summary: "Poll recharge transaction status"
+      parameters:
+        - name: transaction_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: "Transaction status"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [pending, processing, success, failed]
+                  message:
+                    type: string
+                  new_balance:
+                    type: number
+        "404":
+          description: "Transaction not found"
+
+  /payment/process:
+    post:
+      summary: "Process payment for a recharge transaction"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction_id, payment_details]
+              properties:
+                transaction_id:
+                  type: string
+                payment_details:
+                  type: object
+                timeout_seconds:
+                  type: integer
+                  default: 180                          # CHANGED: was 300, now 180
+      responses:
+        "200":
+          description: "Payment processed"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  payment_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [success, failed, pending]
+        "400":
+          description: "Payment failed"
+        "408":                                          # NEW: explicit timeout response
+          description: "Payment timed out"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: "payment_timeout"
+
+  /auto-recharge/setup:                               # NEW endpoint
+    post:
+      summary: "Set up auto-recharge for a mobile number"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mobile_number, plan_id, trigger, payment_token]
+              properties:
+                mobile_number:
+                  type: string
+                plan_id:
+                  type: string
+                  description: "Must have validity >= 28 days"
+                trigger:
+                  type: string
+                  enum: [three_days_before_expiry, on_expiry]
+                payment_token:
+                  type: string
+                  description: "Saved UPI VPA or card token for auto-debit"
+      responses:
+        "200":
+          description: "Auto-recharge configured"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  auto_recharge_id:
+                    type: string
+                  next_recharge_date:
+                    type: string
+        "400":
+          description: "Plan validity less than 28 days"

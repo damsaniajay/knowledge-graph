@@ -1,0 +1,12 @@
+{
+  "tc_id": "TC-f2-001",
+  "flow_id": "f2",
+  "title": "Fetch current and recommended plans successfully",
+  "type": "positive",
+  "steps": [
+    "User is logged in with valid token",
+    "Call GET /plans?type=current&msisdn=9876543210",
+    "Call GET /plans?type=recommended&msisdn=9876543210"
+  ],
+  "expected_result": "HTTP 200 — both current plan details and list of recommended plans returned"
+}

@@ -1,0 +1,14 @@
+{
+  "flow_id": "f2",
+  "story_id": "US1",
+  "title": "Fetch Current and Recommended Plans",
+  "description": "Fetches user's existing plan and recommended plans using parameterized API",
+  "features_used": ["PlanFetch"],
+  "depends_on": ["f1"],
+  "steps": [
+    "User is logged in (token available from f1)",
+    "System calls GET /plans?type=current to fetch active plan",
+    "System calls GET /plans?type=recommended to fetch suggested plans",
+    "User views both current and recommended plans on screen"
+  ]
+}
