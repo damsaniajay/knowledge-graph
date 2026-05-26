@@ -1,12 +1,12 @@
 {
-  "tc_id": "TC-f1-001",
-  "flow_id": "f1",
+  "linked_to": "Login",
   "title": "Valid login with correct credentials",
   "type": "positive",
+  "test_layer": "api",
   "steps": [
     "Enter valid MSISDN: 9876543210",
     "Enter correct password",
     "Submit login form"
   ],
-  "expected_result": "HTTP 200 — session token returned, user redirected to home screen"
+  "expected_result": "HTTP 200 \u2014 session token returned"
 }

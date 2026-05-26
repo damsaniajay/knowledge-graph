@@ -1,4 +1,4 @@
-﻿# Knowledge Graph -- Relationship Intelligence for Test Engineering
+# Knowledge Graph -- Relationship Intelligence for Test Engineering
 
 ## Table of Contents
 
@@ -29,13 +29,15 @@ The core idea behind this system came from one architectural principle:
 
 In software testing today, test cases, API contracts, user stories, and system features are all managed in isolation -- different tools, different teams, no shared understanding of how they connect. When an API changes, nobody knows which test cases break. When a user story evolves, nobody knows which flows are affected.
 
-This Knowledge Graph solves that by treating every entity -- a user story, a feature, an API endpoint, a flow, a test case -- as an **independent node**. The moment any node is uploaded, the system automatically scans all existing nodes and creates every valid relationship. No manual linking. No bulk imports. Order of upload does not matter.
+This Knowledge Graph solves that by treating every entity -- a user story, a feature, an API endpoint, a test case -- as an **independent node**. User journeys are **`flows[]` on the story** (ordered feature names), not separate Flow nodes. The moment any node is uploaded, the system automatically scans all existing nodes and creates every valid relationship. No manual linking. No bulk imports. Order of upload does not matter.
 
 **The standalone node principle:**
 
 > *"If Mohsin is added first as manager, you have only one node -- no connections at all. Then when a new engineer is added, the edge is immediately created between them. Now imagine the reverse: the engineer was already in the system, then the manager joins -- at that point the same edge is created. The graph builds itself regardless of upload order."*
 
-This is exactly how the Knowledge Graph works. Upload a user story first -- it stands alone. Upload a flow later -- the graph links them. Upload the flow first -- it stands alone. Upload the story -- the graph links them. **The graph is always consistent, always current.**
+This is exactly how the Knowledge Graph works. Upload a user story first -- it stands alone (with optional `flows[]`). Upload features later -- the graph links them via `HAS_FEATURE` and `NEXT_STEP`. Upload features first -- they stand alone until the story arrives. **The graph is always consistent, always current.**
+
+> **Sample data:** [`sample_data/README.md`](sample_data/README.md) · **edge coverage:** [`sample_data/DEMO_COVERAGE.md`](sample_data/DEMO_COVERAGE.md) · **where data is stored:** [`docs/STORAGE.md`](docs/STORAGE.md)
 
 When an entity is updated (v2 uploaded):
 
@@ -63,12 +65,14 @@ This is a **demonstration** of the above vision with real data from the Airtel P
 
 | Component | Description |
 |-----------|-------------|
-| **5 Node Types** | UserStory, Feature, APIEndpoint, Flow, TestCase |
-| **5 Edge Types** | HAS_FLOW, USES_FEATURE, CALLS_API, HAS_TEST_CASE, DEPENDS_ON |
+| **Node types** | UserStory, Feature, APIEndpoint, APIResponseSchema, TestCase |
+| **Edges** | HAS_FEATURE, USES_API, HAS_RESPONSE_SCHEMA, NEXT_STEP, DEPENDS_ON, HAS_TEST_CASE, VALIDATES_AGAINST |
+| **Flows** | `UserStory.flows[]` (ordered feature names) + `NEXT_STEP` between features — not separate nodes |
 | **Full Versioning** | Every node: `base_id` (stable) + `node_id` (versioned e.g. `f1_v2`) + `valid_at` / `invalid_at` |
 | **Relationship Mapper** | Runs after every upload -- scans above / below / siblings -- creates all matching edges automatically |
 | **Impact Analyser** | Runs after every v2+ upload -- detects what changed, surfaces all impacted downstream nodes |
 | **CLI** | `main.py` with commands for every operation |
+| **Web UI + REST API** | Interactive graph at `http://localhost:9000` with live Neo4j CRUD |
 | **Neo4j Browser** | Full visual graph -- before/after comparison queries provided |
 
 ### What this demo does NOT include
@@ -103,8 +107,9 @@ This is a **demonstration** of the above vision with real data from the Airtel P
 
 | File | Responsibility |
 |------|----------------|
-| `services/graph_service.py` | Save / retrieve all 5 node types. Versioning logic. Edge creation with `valid_at`. |
-| `services/relationship_mapper.py` | Called after every upload. Scans existing nodes in 3 directions (above, below, siblings). Creates edges. |
+| `services/graph_service.py` | Save / retrieve all node types. Versioning logic. Edge creation with `valid_at`. |
+| `services/linking_engine.py` | Called after every upload. Scans existing nodes in 3 directions (above, below, siblings). Creates edges. |
+| `docs/SCHEMA.md` | Canonical graph model (aligned with KnowledgeGraph_Schema docx) |
 | `services/impact_analyser.py` | Called after every v2+ upload. Computes diff between old and new version. Returns structured list of impacted nodes. |
 | `services/schema_service.py` | One-time Neo4j constraints and indexes setup. |
 | `config.py` | Neo4j connection settings loaded from `.env`. |
@@ -116,24 +121,32 @@ This is a **demonstration** of the above vision with real data from the Airtel P
 ### Node hierarchy
 
 ```
-(:UserStory)          -- Business requirement
+(:UserStory)  flows: ["Login", "PlanFetch", ...]   -- ordered journey (not separate nodes)
       │
-      │ HAS_FLOW
+      │ HAS_FEATURE
       ▼
-(:Flow)               -- One user journey step
-      │  \
-      │   └─ DEPENDS_ON ──► (:Flow)   [sibling dependency]
+(:Feature) ──NEXT_STEP──► (:Feature)     -- sequence from story.flows[]
       │
-      │ USES_FEATURE
+      │ USES_API
       ▼
-(:Feature)            -- A named capability (Login, Payment, etc.)
-      │
-      │ CALLS_API
-      ▼
-(:APIEndpoint)        -- One REST endpoint
+(:APIEndpoint) ──HAS_RESPONSE_SCHEMA──► (:APIResponseSchema)
 
-(:Flow) ──HAS_TEST_CASE──► (:TestCase)
+(:UserStory|Feature|APIEndpoint) ──HAS_TEST_CASE──► (:TestCase)
+(:TestCase) ──VALIDATES_AGAINST──► (:APIResponseSchema)   [negative tests]
 ```
+
+```
+UserStory  -[HAS_FEATURE]->      Feature
+UserStory  -[USES_API]->         APIEndpoint
+UserStory  -[HAS_TEST_CASE]->    TestCase
+Feature    -[USES_API]->         APIEndpoint
+Feature    -[HAS_TEST_CASE]->    TestCase
+APIEndpoint -[HAS_TEST_CASE]->   TestCase
+```
+
+**Flows** are a **list property** on `UserStory` (`flows[]`), not separate nodes. Feature order uses `NEXT_STEP` edges.
+
+Full reference: [`docs/SCHEMA.md`](docs/SCHEMA.md), [`docs/STORAGE.md`](docs/STORAGE.md), [`sample_data/DEMO_COVERAGE.md`](sample_data/DEMO_COVERAGE.md).
 
 ### Node properties (all nodes carry these)
 
@@ -143,16 +156,16 @@ This is a **demonstration** of the above vision with real data from the Airtel P
 | `node_id` | Versioned ID -- e.g. `"f1_v1"`, `"f1_v2"` |
 | `version` | Integer -- increments on each re-upload |
 | `is_current` | `true` on the active version only |
-| `valid_at` | ISO timestamp -- when this version became active |
-| `invalid_at` | ISO timestamp -- when this version was superseded (`null` = still active) |
-| `status` | `"active"` or `"expired"` |
+| `valid_from` | ISO timestamp — when this version became active |
+| `valid_to` | ISO timestamp — when superseded (`null` = still active) |
+| `status` | `"active"` or `"archived"` — see `docs/VERSIONING.md` |
 
 ### Edge properties
 
 | Property | Description |
 |----------|-------------|
-| `valid_at` | When this relationship was first created |
-| `invalid_at` | When this relationship was superseded (`null` = still active) |
+| `valid_from` | When this relationship was first created |
+| `valid_to` | When this relationship was superseded (`null` = still active) |
 
 ---
 
@@ -180,6 +193,27 @@ NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=your_password
 ```
+
+### Web UI (live graph editor)
+
+Start the API server (serves the frontend and REST endpoints):
+
+```bash
+python3 run_server.py
+# or: uvicorn api.main:app --reload --port 9000
+```
+
+Open **http://localhost:9000** in your browser.
+
+| Action | Behavior |
+|--------|----------|
+| **Upload file** | Drop JSON/YAML (same files as CLI) — auto-detect type, preview, then sync to Neo4j |
+| **Manual entry** | Collapsible backup form when you don't have a file |
+| **Edit node** | Creates a new version in Neo4j (append-only); graph refreshes immediately |
+| **Delete node** | Removes current version + relationships from Neo4j |
+| **Story filter** | Dropdown scopes the view to one user story |
+
+REST API: `GET /api/graph`, `POST /api/upload`, `POST /api/upload/preview`, `POST /api/nodes/{type}`, `DELETE /api/nodes/{type}/{id}`
 
 ### Python interpreter note (Windows)
 
@@ -245,9 +279,9 @@ python main.py upload-feature sample_data/features/feature_payment.json
 ```
 
 **What happens:**  
-→ 4 Feature nodes created -- each declares which APIs it will use  
+→ 4 Feature nodes created -- each declares `apis_used` and optional `depends_on`  
 → No API nodes exist yet -- features stand alone  
-→ No flows exist yet -- no USES_FEATURE edges yet
+→ Story already has `flows[]` -- when features exist, mapper creates `HAS_FEATURE` + `NEXT_STEP`
 
 ---
 
@@ -267,95 +301,58 @@ python main.py upload-api sample_data/api/spec_v1.yaml
 
 **What happens:**  
 → 6 APIEndpoint nodes created  
-→ Relationship mapper immediately links Features → APIs:
-  - `Login` → `CALLS_API` → `POST:/auth/login`, `POST:/auth/token/refresh`
-  - `PlanFetch` → `CALLS_API` → `GET:/plans`
-  - `PlanSwitch` → `CALLS_API` → `POST:/plans/switch`
-  - `Payment` → `CALLS_API` → `POST:/payments/pay`, `POST:/payments/activate`
+→ Linking engine links Features → APIs via `USES_API` and creates `APIResponseSchema` nodes from OpenAPI responses  
+→ Re-links story `flows[]` → `HAS_FEATURE` + `NEXT_STEP` (Login → PlanFetch → PlanSwitch → Payment)
 
 ---
 
-#### Step 4 -- Upload Flows
+#### Step 4 -- Upload Test Cases
 
 ```bash
-python main.py upload-flow sample_data/flows/f1_login.json
-python main.py upload-flow sample_data/flows/f2_fetchplan.json
-python main.py upload-flow sample_data/flows/f3_planswitch.json
-python main.py upload-flow sample_data/flows/f4_payment.json
+python main.py upload-testcase sample_data/testcases/TC-login-001.json
+python main.py upload-testcase sample_data/testcases/TC-login-002.json
+python main.py upload-testcase sample_data/testcases/TC-planfetch-001.json
+python main.py upload-testcase sample_data/testcases/TC-planfetch-002.json
+python main.py upload-testcase sample_data/testcases/TC-planswitch-001.json
+python main.py upload-testcase sample_data/testcases/TC-planswitch-002.json
+python main.py upload-testcase sample_data/testcases/TC-payment-001.json
+python main.py upload-testcase sample_data/testcases/TC-payment-002.json
 ```
 
-**Flow chain:**
-
-| Flow | Title | Depends On | Feature Used |
-|------|-------|-----------|--------------|
-| f1 | User Login | -- | Login |
-| f2 | Fetch Current and Recommended Plans | f1 | PlanFetch |
-| f3 | Switch Plan | f2 | PlanSwitch |
-| f4 | Payment and Activation | f3 | Payment |
-
-**What happens on each flow upload:**  
-→ Flow node created  
-→ Mapper links **UP** → `US1_v2` via `HAS_FLOW`  
-→ Mapper links **ACROSS** → matching Feature via `USES_FEATURE`  
-→ Mapper links **SIBLINGS** → `DEPENDS_ON` previous flow (f2→f1, f3→f2, f4→f3)
-
----
-
-#### Step 5 -- Upload Test Cases
-
-```bash
-python main.py upload-testcase sample_data/testcases/TC-f1-001.json
-python main.py upload-testcase sample_data/testcases/TC-f1-002.json
-python main.py upload-testcase sample_data/testcases/TC-f2-001.json
-python main.py upload-testcase sample_data/testcases/TC-f3-001.json
-python main.py upload-testcase sample_data/testcases/TC-f4-001.json
-```
-
-| Test Case | Flow | Type | Title |
-|-----------|------|------|-------|
-| TC-f1-001 | f1 | positive | Valid login with correct credentials |
-| TC-f1-002 | f1 | negative | Login with wrong password |
-| TC-f2-001 | f2 | positive | Fetch current and recommended plans |
-| TC-f3-001 | f3 | positive | Switch to valid plan successfully |
-| TC-f4-001 | f4 | positive | Successful payment and plan activation |
+| Test Case | linked_to | Type | Title |
+|-----------|-----------|------|-------|
+| TC-login-001 | Login | positive | Valid login with correct credentials |
+| TC-login-002 | Login | negative | Login with wrong password |
+| TC-planfetch-001 | PlanFetch | positive | Fetch current and recommended plans |
+| TC-planfetch-002 | PlanFetch | negative | Fetch plans without authentication |
+| TC-planswitch-001 | PlanSwitch | positive | Switch to valid plan successfully |
+| TC-planswitch-002 | PlanSwitch | negative | Switch plan with invalid plan id |
+| TC-payment-001 | Payment | positive | Successful payment and plan activation |
+| TC-payment-002 | Payment | negative | Payment with declined card |
 
 **What happens:**  
-→ Each TestCase links to its parent Flow via `HAS_TEST_CASE`
+→ Each TestCase links via `linked_to` (feature name, story id, or `METHOD:path`) using `HAS_TEST_CASE`
 
 ---
 
-#### Step 6 -- View the complete graph (terminal)
+#### Step 5 -- View the complete graph (terminal)
 
 ```bash
 python main.py show-graph US1
 ```
 
-Expected output:
+Expected output (features follow `flows[]` order; no Flow nodes):
 ```
-📖 UserStory : US1  "Plan Change"  v1
+📖 UserStory : US1  "Plan Change"  v1  flows: Login → PlanFetch → PlanSwitch → Payment
 
-  ├── 🔄 Flow: f1  "User Login"  v1
-  │      ├── 🧩 Feature: Login  v1
-  │      │       └── 🔌 POST  /auth/login  v1
-  │      │       └── 🔌 POST  /auth/token/refresh  v1
-  │      └── 📋 TestCase: TC-f1-001  [positive]  "Valid login with correct credentials"
-  │      └── 📋 TestCase: TC-f1-002  [negative]  "Login with wrong password"
-  │
-  ├── 🔄 Flow: f2  "Fetch Plans"  v1  ← depends_on: f1
-  │      ├── 🧩 Feature: PlanFetch  v1
-  │      │       └── 🔌 GET  /plans  v1
-  │      └── 📋 TestCase: TC-f2-001  [positive]
-  │
-  ├── 🔄 Flow: f3  "Switch Plan"  v1  ← depends_on: f2
-  │      ├── 🧩 Feature: PlanSwitch  v1
-  │      │       └── 🔌 POST  /plans/switch  v1
-  │      └── 📋 TestCase: TC-f3-001  [positive]
-  │
-  └── 🔄 Flow: f4  "Payment and Activation"  v1  ← depends_on: f3
-         ├── 🧩 Feature: Payment  v1
-         │       └── 🔌 POST  /payments/pay  v1
-         │       └── 🔌 POST  /payments/activate  v1
-         └── 📋 TestCase: TC-f4-001  [positive]
+  ├── 🧩 Feature: Login  v1
+  │      ├── 🔌 POST:/auth/login
+  │      ├── 📋 TC-login-001 [positive]
+  │      └── 📋 TC-login-002 [negative]
+  ├── 🧩 Feature: PlanFetch  v1  (NEXT_STEP from Login)
+  │      ├── 🔌 GET:/plans
+  │      └── 📋 TC-planfetch-001 / TC-planfetch-002
+  … PlanSwitch, Payment …
 ```
 
 ---
@@ -389,8 +386,8 @@ python main.py upload-story sample_data/stories/story_v2.json
 **What happens:**  
 → `US1_v1` expires (`invalid_at` set, `is_current = false`)  
 → `US1_v2` becomes active  
-→ Mapper re-links all existing flows to `US1_v2`  
-→ **Impact report** -- all flows and their test cases flagged
+→ Story `flows[]` may be re-derived or kept from JSON  
+→ **Impact report** -- features and test cases on this story flagged where content changed
 
 ---
 
@@ -411,7 +408,7 @@ python main.py upload-api sample_data/api/spec_v2.yaml
 **What happens per endpoint:**  
 → Old endpoint version expires, new version created  
 → **Impact report per endpoint** -- cascade traced automatically:  
-  - API change → impacted Feature → impacted Flow → impacted TestCases
+  - API change → impacted Feature → impacted TestCases (via `linked_to`)
 
 Example output for `/auth/login`:
 ```
@@ -421,31 +418,12 @@ IMPACT REPORT  --  API ENDPOINT: POST:/auth/login  (v1 --> v2)
     -  Fields Removed: password
 
   IMPACTED FEATURES (1): Login
-  IMPACTED FLOWS (1):    f1  "User Login"  [via Login]
   IMPACTED TEST CASES (2):
-    !  TC-f1-001_v1  "Valid login with correct credentials"
-    !  TC-f1-002_v1  "Login with wrong password"
+    !  TC-login-001  "Valid login with correct credentials"
+    !  TC-login-002  "Login with wrong password"
 
-  ACTION: 2 test case(s) flagged -- review and re-upload them.
+  ACTION: review and re-upload affected test cases.
 ```
-
----
-
-#### Step 9 -- Upload updated flow v2
-
-```bash
-python main.py upload-flow sample_data/flows/f1_login_v2.json
-```
-
-**What changed in f1 v2:**  
-→ `features_used` now includes `"OTPService"` (new feature, not yet in graph)  
-→ Steps updated to reflect OTP-based authentication
-
-**What happens:**  
-→ `f1_v1` expires, `f1_v2` created  
-→ `OTPService` referenced but not in graph → surfaced as missing node  
-→ Direct impact: TC-f1-001, TC-f1-002  
-→ Indirect impact: TC-f2-001 (f2 depends on f1)
 
 ---
 
@@ -517,17 +495,17 @@ ORDER BY r.valid_at
 ```cypher
 MATCH (n)
 WHERE n.is_current = false
-  AND (n:UserStory OR n:Flow OR n:Feature OR n:APIEndpoint OR n:TestCase)
+  AND (n:UserStory OR n:Feature OR n:APIEndpoint OR n:APIResponseSchema OR n:TestCase)
 RETURN labels(n)[0] AS type, n.node_id, n.valid_at, n.invalid_at
 ORDER BY n.valid_at
 ```
 
-### See test cases still linked to expired flows (impacted, not yet updated)
+### See test cases linked to expired features (impacted, not yet updated)
 
 ```cypher
-MATCH (f:Flow {is_current:false})-[:HAS_TEST_CASE]->(tc:TestCase)
-RETURN f.node_id AS expired_flow, tc.node_id AS tc, tc.title
-ORDER BY expired_flow
+MATCH (f:Feature {is_current:false})-[:HAS_TEST_CASE]->(tc:TestCase)
+RETURN f.node_id AS expired_feature, tc.node_id AS tc, tc.title
+ORDER BY expired_feature
 ```
 
 ### See all API schema changes across versions
@@ -539,10 +517,11 @@ RETURN ep.node_id, ep.method, ep.path, ep.valid_at, ep.invalid_at, ep.is_current
 ORDER BY ep.path, ep.version
 ```
 
-### See flow dependency chain
+### See feature sequence (NEXT_STEP chain)
 
 ```cypher
-MATCH p=(f:Flow {is_current:true})-[:DEPENDS_ON*1..5]->(dep:Flow {is_current:true})
+MATCH p=(f:Feature {is_current:true})-[:NEXT_STEP*1..5]->(n:Feature {is_current:true})
+WHERE f.base_id = 'Login'
 RETURN p
 ```
 
@@ -550,7 +529,7 @@ RETURN p
 
 ```cypher
 MATCH (n)
-WHERE n:UserStory OR n:Flow OR n:Feature OR n:APIEndpoint OR n:TestCase
+WHERE n:UserStory OR n:Feature OR n:APIEndpoint OR n:APIResponseSchema OR n:TestCase
 RETURN labels(n)[0]  AS type,
        n.is_current  AS is_current,
        count(n)      AS count
@@ -569,15 +548,13 @@ python main.py setup-schema
 python main.py upload-story    sample_data/stories/story_v1.json
 python main.py upload-feature  sample_data/features/feature_login.json
 python main.py upload-api      sample_data/api/spec_v1.yaml
-python main.py upload-flow     sample_data/flows/f1_login.json
-python main.py upload-testcase sample_data/testcases/TC-f1-001.json
+python main.py upload-testcase sample_data/testcases/TC-login-001.json
 
 # Query the graph
 python main.py show-graph    US1
 python main.py show-history  story    US1
 python main.py show-history  feature  Login
-python main.py show-history  flow     f1
-python main.py show-history  testcase TC-f1-001
+python main.py show-history  testcase TC-login-001
 
 # Delta and comparison (after uploading a v2)
 python main.py delta       US1

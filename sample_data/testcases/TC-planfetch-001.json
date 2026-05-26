@@ -1,0 +1,12 @@
+{
+  "linked_to": "PlanFetch",
+  "title": "Fetch current and recommended plans successfully",
+  "type": "positive",
+  "test_layer": "api",
+  "steps": [
+    "User is logged in with valid token",
+    "Call GET /plans?type=current",
+    "Call GET /plans?type=recommended"
+  ],
+  "expected_result": "HTTP 200 \u2014 current and recommended plans returned"
+}

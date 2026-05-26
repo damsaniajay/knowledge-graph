@@ -1,40 +1,19 @@
 """
-impact_analyser.py
-Automatically runs after every v2+ entity upload.
-
-For each entity type, analyses what changed between old and new version,
-then surfaces all downstream nodes that are impacted (need review / re-upload).
-
-Entry point: analyse(entity_type, base_id)
-  Returns: impact report dict, or None if this was a brand-new (v1) upload.
-
-Impact propagation:
-  Flow changed     → TCs of this flow impacted
-                   → Flows that DEPEND_ON this flow are flagged
-                   → Those flows' TCs are indirectly impacted
-  Feature changed  → Flows using this feature impacted → their TCs impacted
-  API changed      → Features calling this API impacted
-                   → Those features' flows impacted → their TCs impacted
-  Story changed    → All flows under story flagged → all their TCs impacted
+Impact analyser — schema v2 (no Flow nodes).
+Surfaces downstream entities when a node version changes.
 """
 
 import json as _json
+
 from services import graph_service as gs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
-
 def analyse(entity_type: str, base_id: str) -> dict | None:
-    """
-    Called after every upload. Returns None for v1 (nothing was changed).
-    """
     dispatch = {
-        "user_story":   _analyse_user_story,
-        "feature":      _analyse_feature,
+        "user_story": _analyse_user_story,
+        "feature": _analyse_feature,
         "api_endpoint": _analyse_api_endpoint,
-        "flow":         _analyse_flow,
+        "test_case": _analyse_test_case,
     }
     fn = dispatch.get(entity_type)
     if not fn:
@@ -42,155 +21,86 @@ def analyse(entity_type: str, base_id: str) -> dict | None:
     return fn(base_id)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Flow impact
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _analyse_flow(base_id: str) -> dict | None:
-    history = gs.get_flow_history(base_id)
+def _analyse_user_story(base_id: str) -> dict | None:
+    history = gs.get_user_story_history(base_id)
     if len(history) < 2:
         return None
 
-    prev = history[-2]
-    curr = history[-1]
+    prev, curr = history[-2], history[-1]
+    prev_p, curr_p = gs.get_node_props(prev["node_id"]), gs.get_node_props(curr["node_id"])
 
-    prev_props = gs.get_node_props(prev["node_id"])
-    curr_props = gs.get_node_props(curr["node_id"])
+    prev_flows = list(prev_p.get("flows") or [])
+    curr_flows = list(curr_p.get("flows") or [])
 
-    # Feature diff
-    prev_features = set(prev_props.get("features_used") or [])
-    curr_features  = set(curr_props.get("features_used") or [])
-    features_added   = sorted(curr_features - prev_features)
-    features_removed = sorted(prev_features - curr_features)
+    story = gs.get_user_story(base_id)
+    impacted_features = gs.get_features_for_story(story["node_id"]) if story else []
+    impacted_tcs: dict[str, dict] = {}
+    for feat in impacted_features:
+        for tc in gs.get_test_cases_for_entity(feat["node_id"]):
+            impacted_tcs[tc["node_id"]] = {**tc, "reason": f"UserStory {base_id} changed"}
 
-    # Dependency diff
-    prev_deps = set(prev_props.get("depends_on") or [])
-    curr_deps  = set(curr_props.get("depends_on") or [])
-    deps_added   = sorted(curr_deps - prev_deps)
-    deps_removed = sorted(prev_deps - curr_deps)
-
-    # Step diff (word-level)
-    def _steps_text(props: dict) -> str:
-        raw = props.get("steps") or []
-        if isinstance(raw, str):
-            try:
-                raw = _json.loads(raw)
-            except Exception:
-                return raw.lower()
-        return " ".join(raw).lower()
-
-    prev_steps = _steps_text(prev_props)
-    curr_steps  = _steps_text(curr_props)
-    steps_changed = prev_steps != curr_steps
-
-    # Direct TCs — gather from BOTH old and new version nodes (union)
-    tcs_old  = gs.get_connected_test_cases(prev["node_id"])
-    tcs_curr = gs.get_connected_test_cases(curr["node_id"])
-    all_tcs  = {tc["node_id"]: tc for tc in tcs_old + tcs_curr}
-    for tc in all_tcs.values():
-        tc["reason"] = f"Flow {base_id} content changed (v{prev['version']}→v{curr['version']})"
-
-    # Flows that DEPEND_ON this flow
-    dependent_flows = gs.get_flows_depending_on(base_id)
-
-    # TCs of dependent flows (indirect impact)
-    indirect_tcs: dict[str, dict] = {}
-    for dep_flow in dependent_flows:
-        for tc in gs.get_connected_test_cases(dep_flow["node_id"]):
-            if tc["node_id"] not in all_tcs and tc["node_id"] not in indirect_tcs:
-                tc["via_flow"] = dep_flow["base_id"]
-                tc["reason"] = f"Flow {dep_flow['base_id']} depends on {base_id} (changed)"
-                indirect_tcs[tc["node_id"]] = tc
-
-    # Missing nodes — features referenced in v2 but not yet in graph
-    missing_features = [f for f in curr_features if not gs.get_feature_by_name(f)]
+    if story:
+        for tc in gs.get_test_cases_for_entity(story["node_id"]):
+            impacted_tcs[tc["node_id"]] = {**tc, "reason": f"UserStory {base_id} changed"}
 
     return {
-        "entity_type":    "flow",
-        "base_id":        base_id,
-        "old_version":    prev["version"],
-        "new_version":    curr["version"],
-        "steps_changed":  steps_changed,
+        "entity_type": "user_story",
+        "base_id": base_id,
+        "old_version": prev["version"],
+        "new_version": curr["version"],
         "changes": {
-            "features_added":    features_added,
-            "features_removed":  features_removed,
-            "depends_on_added":  deps_added,
-            "depends_on_removed": deps_removed,
+            "flows_added": sorted(set(curr_flows) - set(prev_flows)),
+            "flows_removed": sorted(set(prev_flows) - set(curr_flows)),
         },
-        "impacted_test_cases":          list(all_tcs.values()),
-        "impacted_flows":               dependent_flows,
-        "indirect_impacted_test_cases": list(indirect_tcs.values()),
-        "missing_nodes": {"features": missing_features},
+        "impacted_features": impacted_features,
+        "impacted_test_cases": list(impacted_tcs.values()),
+        "coupling_note": "Cascade depth respects USES_API.coupling_type (tight=full regen, loose=re-validate)",
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Feature impact
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _analyse_feature(base_id: str) -> dict | None:
     history = gs.get_feature_history(base_id)
     if len(history) < 2:
         return None
 
-    prev = history[-2]
-    curr = history[-1]
+    prev, curr = history[-2], history[-1]
+    prev_p, curr_p = gs.get_node_props(prev["node_id"]), gs.get_node_props(curr["node_id"])
 
-    prev_props = gs.get_node_props(prev["node_id"])
-    curr_props  = gs.get_node_props(curr["node_id"])
+    prev_apis = set(prev_p.get("apis_used") or [])
+    curr_apis = set(curr_p.get("apis_used") or [])
 
-    prev_apis = set(prev_props.get("apis_used") or [])
-    curr_apis  = set(curr_props.get("apis_used") or [])
-    apis_added   = sorted(curr_apis - prev_apis)
-    apis_removed = sorted(prev_apis - curr_apis)
+    feature = gs.get_feature(base_id)
+    feat_node = feature["node_id"] if feature else None
 
-    # Flows using this feature
-    feature  = gs.get_feature(base_id)
-    feat_name = feature["name"] if feature else base_id
-    impacted_flows = gs.get_flows_using_feature(feat_name)
-
-    # TCs of those flows
     impacted_tcs: dict[str, dict] = {}
-    for flow in impacted_flows:
-        for tc in gs.get_connected_test_cases(flow["node_id"]):
-            if tc["node_id"] not in impacted_tcs:
-                tc["via_flow"]  = flow["base_id"]
-                tc["reason"] = f"Feature {base_id} changed — used by flow {flow['base_id']}"
-                impacted_tcs[tc["node_id"]] = tc
+    if feat_node:
+        for tc in gs.get_test_cases_for_entity(feat_node):
+            impacted_tcs[tc["node_id"]] = {**tc, "reason": f"Feature {base_id} changed"}
 
-    # Missing API nodes
-    missing_apis = [a for a in curr_apis if not gs.get_endpoint_by_path(a)]
+    apis = gs.get_apis_for_feature(feat_node) if feat_node else []
 
     return {
-        "entity_type":  "feature",
-        "base_id":      base_id,
-        "old_version":  prev["version"],
-        "new_version":  curr["version"],
+        "entity_type": "feature",
+        "base_id": base_id,
+        "old_version": prev["version"],
+        "new_version": curr["version"],
         "changes": {
-            "apis_added":   apis_added,
-            "apis_removed": apis_removed,
+            "apis_added": sorted(curr_apis - prev_apis),
+            "apis_removed": sorted(prev_apis - curr_apis),
         },
-        "impacted_flows":      impacted_flows,
+        "impacted_api_endpoints": apis,
         "impacted_test_cases": list(impacted_tcs.values()),
-        "indirect_impacted_test_cases": [],
-        "missing_nodes": {"api_endpoints": missing_apis},
+        "coverage_gap": _feature_coverage_gap(base_id),
     }
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# API Endpoint impact
-# ─────────────────────────────────────────────────────────────────────────────
 
 def _analyse_api_endpoint(base_id: str) -> dict | None:
     history = gs.get_endpoint_history(base_id)
     if len(history) < 2:
         return None
 
-    prev = history[-2]
-    curr = history[-1]
-
-    prev_props = gs.get_node_props(prev["node_id"])
-    curr_props  = gs.get_node_props(curr["node_id"])
+    prev, curr = history[-2], history[-1]
+    prev_p, curr_p = gs.get_node_props(prev["node_id"]), gs.get_node_props(curr["node_id"])
 
     def _fields(props: dict) -> set[str]:
         raw = props.get("request_schema") or "{}"
@@ -200,94 +110,65 @@ def _analyse_api_endpoint(base_id: str) -> dict | None:
         except Exception:
             return set()
 
-    prev_fields = _fields(prev_props)
-    curr_fields  = _fields(curr_props)
-    fields_added   = sorted(curr_fields - prev_fields)
-    fields_removed = sorted(prev_fields - curr_fields)
+    prev_f, curr_f = _fields(prev_p), _fields(curr_p)
+    features = gs.get_features_using_api(base_id)
 
-    # Features calling this API
-    impacted_features = gs.get_features_calling_api(base_id)
-
-    # Flows using those features → TCs
-    impacted_flows: dict[str, dict] = {}
-    impacted_tcs:   dict[str, dict] = {}
-
-    for feat in impacted_features:
-        for flow in gs.get_flows_using_feature(feat["name"]):
-            if flow["node_id"] not in impacted_flows:
-                flow["via_feature"] = feat["name"]
-                impacted_flows[flow["node_id"]] = flow
-            for tc in gs.get_connected_test_cases(flow["node_id"]):
-                if tc["node_id"] not in impacted_tcs:
-                    tc["via_flow"]    = flow["base_id"]
-                    tc["via_feature"] = feat["name"]
-                    tc["reason"] = (
-                        f"API {base_id} schema changed → "
-                        f"Feature {feat['name']} → Flow {flow['base_id']}"
-                    )
-                    impacted_tcs[tc["node_id"]] = tc
+    impacted_tcs: dict[str, dict] = {}
+    for feat in features:
+        for tc in gs.get_test_cases_for_entity(feat["node_id"]):
+            impacted_tcs[tc["node_id"]] = {
+                **tc,
+                "reason": f"API {base_id} changed → Feature {feat['name']}",
+            }
 
     return {
-        "entity_type":  "api_endpoint",
-        "base_id":      base_id,
-        "old_version":  prev["version"],
-        "new_version":  curr["version"],
+        "entity_type": "api_endpoint",
+        "base_id": base_id,
+        "old_version": prev["version"],
+        "new_version": curr["version"],
         "changes": {
-            "fields_added":   fields_added,
-            "fields_removed": fields_removed,
+            "fields_added": sorted(curr_f - prev_f),
+            "fields_removed": sorted(prev_f - curr_f),
         },
-        "impacted_features":   impacted_features,
-        "impacted_flows":      list(impacted_flows.values()),
+        "impacted_features": features,
         "impacted_test_cases": list(impacted_tcs.values()),
-        "indirect_impacted_test_cases": [],
-        "missing_nodes": {},
+        "response_schema_review": "Re-evaluate APIResponseSchema rows for negative test gaps",
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# UserStory impact
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _analyse_user_story(base_id: str) -> dict | None:
-    history = gs.get_user_story_history(base_id)
+def _analyse_test_case(base_id: str) -> dict | None:
+    history = gs.get_test_case_history(base_id)
     if len(history) < 2:
         return None
-
-    prev = history[-2]
-    curr = history[-1]
-
-    prev_props = gs.get_node_props(prev["node_id"])
-    curr_props  = gs.get_node_props(curr["node_id"])
-
-    prev_words = set((prev_props.get("content") or "").lower().split())
-    curr_words  = set((curr_props.get("content") or "").lower().split())
-    words_added   = sorted((curr_words - prev_words))[:20]
-    words_removed = sorted((prev_words - curr_words))[:20]
-
-    # All flows under current story version
-    story = gs.get_user_story(base_id)
-    impacted_flows = gs.get_connected_flows(story["node_id"]) if story else []
-
-    # All TCs of those flows
-    impacted_tcs: dict[str, dict] = {}
-    for flow in impacted_flows:
-        for tc in gs.get_connected_test_cases(flow["node_id"]):
-            if tc["node_id"] not in impacted_tcs:
-                tc["via_flow"] = flow["base_id"]
-                tc["reason"] = f"UserStory {base_id} changed — ancestor of flow {flow['base_id']}"
-                impacted_tcs[tc["node_id"]] = tc
-
     return {
-        "entity_type":  "user_story",
-        "base_id":      base_id,
-        "old_version":  prev["version"],
-        "new_version":  curr["version"],
-        "changes": {
-            "words_added":   words_added,
-            "words_removed": words_removed,
-        },
-        "impacted_flows":      impacted_flows,
-        "impacted_test_cases": list(impacted_tcs.values()),
-        "indirect_impacted_test_cases": [],
-        "missing_nodes": {},
+        "entity_type": "test_case",
+        "base_id": base_id,
+        "message": "No downstream impact. Coverage check re-run on parent.",
+        "coverage_gap": _coverage_for_linked(base_id),
     }
+
+
+def _feature_coverage_gap(feature_base_id: str) -> list[str]:
+    """Every Feature needs ≥1 positive and ≥1 negative TC."""
+    gaps = []
+    feature = gs.get_feature(feature_base_id)
+    if not feature:
+        return ["Feature not found"]
+    tcs = gs.get_test_cases_for_entity(feature["node_id"])
+    types = {tc.get("type") for tc in tcs}
+    if "positive" not in types:
+        gaps.append("Missing positive TestCase")
+    if "negative" not in types:
+        gaps.append("Missing negative TestCase")
+    return gaps
+
+
+def _coverage_for_linked(tc_base_id: str) -> list[str]:
+    tc = gs.get_test_case(tc_base_id)
+    if not tc:
+        return []
+    linked = tc.get("linked_to", "")
+    feat = gs.get_feature(linked) or gs.get_feature_by_name(linked)
+    if feat:
+        return _feature_coverage_gap(feat["base_id"])
+    return []

@@ -1,0 +1,11 @@
+{
+  "linked_to": "Plan Change",
+  "title": "End-to-end plan change journey (story level)",
+  "type": "positive",
+  "test_layer": "e2e",
+  "steps": [
+    "Execute full journey: login, fetch plans, switch plan, pay, activate",
+    "Verify subscriber ends on new plan"
+  ],
+  "expected_result": "All steps succeed; story acceptance criteria met"
+}

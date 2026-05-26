@@ -1,0 +1,10 @@
+{
+  "linked_to": "Payment",
+  "title": "Payment with declined card",
+  "type": "negative",
+  "test_layer": "api",
+  "steps": [
+    "POST /payments/pay with invalid card details"
+  ],
+  "expected_result": "HTTP 400 \u2014 payment declined"
+}

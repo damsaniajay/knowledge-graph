@@ -1,5 +1,6 @@
 {
-  "story_id": "US1",
   "title": "Plan Change",
-  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must login, view existing plan, browse recommended plans, select a new plan, make payment, and activate the new plan."
+  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must call POST /auth/login to authenticate, use GET /plans to view current and recommended plans, POST /plans/switch to select a new plan, then POST /payments/pay and POST /payments/activate to complete payment and activation.",
+  "depends_on": [],
+  "blocked_by": []
 }

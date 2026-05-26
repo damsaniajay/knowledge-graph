@@ -1,6 +1,6 @@
 {
-  "feature_id": "PlanFetch",
   "name": "PlanFetch",
-  "description": "Fetches current and recommended plans using a single parameterized API",
-  "apis_used": ["/plans"]
+  "description": "Fetches current and recommended plans for the subscriber",
+  "apis_used": ["/plans"],
+  "depends_on": ["Login"]
 }
