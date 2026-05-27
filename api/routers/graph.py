@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from services import graph_service as gs
 from services import linking_engine as mapper
 from services import schema_service
+from services.story_flow_delta import compute_story_flow_delta
 
 router = APIRouter(prefix="/api/graph", tags=["graph"])
 
@@ -18,19 +19,35 @@ def health():
 def get_graph(
     story_id: str | None = Query(
         None,
-        description="Optional story to highlight (all nodes are always returned)",
+        description="UserStory base_id (for flow delta vs previous version)",
+    ),
+    story_node_id: str | None = Query(
+        None,
+        description="Specific UserStory node_id to focus in the UI",
     ),
 ):
-    if story_id and not gs.get_user_story(story_id):
+    if story_node_id:
+        version = gs.get_user_story_version(story_node_id)
+        if not version:
+            raise HTTPException(404, f"UserStory node '{story_node_id}' not found")
+        story_id = version["base_id"]
+    elif story_id and not gs.user_story_base_id_exists(story_id):
         raise HTTPException(404, f"UserStory '{story_id}' not found")
-    graph = gs.get_full_graph()
+
+    if story_node_id:
+        graph = gs.get_story_subgraph(story_node_id)
+    else:
+        graph = gs.get_full_graph(story_base_id=story_id)
     graph["focus_story_id"] = story_id
+    graph["focus_story_node_id"] = story_node_id
+    if story_id:
+        graph["story_flow_delta"] = compute_story_flow_delta(story_id)
     return graph
 
 
 @router.get("/stories")
 def list_stories():
-    return {"stories": gs.get_all_user_stories()}
+    return {"stories": gs.list_user_story_versions()}
 
 
 @router.get("/nodes")
@@ -41,7 +58,7 @@ def list_nodes():
 
 @router.post("/repair-schema")
 def repair_schema():
-    """Drop legacy endpoint_id UNIQUE constraint and fix archived API nodes."""
+    """Drop legacy property UNIQUE constraints and repair archived / orphaned version nodes."""
     return schema_service.repair_endpoint_id_collisions()
 
 

@@ -2,6 +2,8 @@
 
 The **live graph** is stored in **Neo4j** (`NEO4J_URI` in `.env`). The schema document’s SQL **history** tables are optional and implemented in **PostgreSQL** when `DATABASE_URL` is set — see **`docs/GRAPHITI_AND_TRACKING.md`**.
 
+The graph UI loads **all versions** (current + archived) from Neo4j; archived nodes use a dashed border. Only `is_current = true` is used for linking/re-sync, not for display.
+
 There is no separate “response schema table” in a relational database — each OpenAPI response becomes an **`APIResponseSchema`** node linked from **`APIEndpoint`**.
 
 ## Mental model

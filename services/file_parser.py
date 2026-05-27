@@ -8,6 +8,7 @@ ENTITY_STORY = "user_story"
 ENTITY_FEATURE = "feature"
 ENTITY_TEST_CASE = "test_case"
 ENTITY_API_SPEC = "api_spec"
+ENTITY_BUNDLE = "bundle"
 
 
 def _load_data(filename: str, content: bytes) -> Any:
@@ -26,6 +27,10 @@ def _load_data(filename: str, content: bytes) -> Any:
 def detect_entity_type(data: Any) -> str:
     if not isinstance(data, dict):
         raise ValueError("File must contain a JSON object or OpenAPI spec")
+    from services.bundle_parser import is_bundle
+
+    if is_bundle(data):
+        return ENTITY_BUNDLE
     if "paths" in data and isinstance(data.get("paths"), dict):
         return ENTITY_API_SPEC
     if "path" in data and "method" in data:
@@ -51,8 +56,8 @@ def detect_entity_type(data: Any) -> str:
     if "story_id" in data:
         return ENTITY_STORY
     raise ValueError(
-        "Could not detect type. Use: user story (title+content), feature (name), "
-        "test case (title+linked_to), or OpenAPI (paths)."
+        "Could not detect type. Use: bundle (openapi + features + user_story), "
+        "user story (title+content), feature (name), test case (title+linked_to), or OpenAPI (paths)."
     )
 
 
@@ -76,6 +81,11 @@ def _validate_item(entity_type: str, data: dict) -> None:
 def parse_upload(filename: str, content: bytes, entity_type: str | None = None) -> dict:
     data = _load_data(filename, content)
     detected = entity_type or detect_entity_type(data)
+
+    if detected == ENTITY_BUNDLE:
+        from services.bundle_parser import parse_bundle
+
+        return parse_bundle(data)
 
     if detected == ENTITY_API_SPEC:
         from services.openapi_ingest import parse_openapi

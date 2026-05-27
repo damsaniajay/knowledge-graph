@@ -7,11 +7,20 @@ from services.entity_identity import resolve_upload_items
 from services.file_parser import ENTITY_API_SPEC, ENTITY_FEATURE, ENTITY_STORY, ENTITY_TEST_CASE, parse_upload
 from services.upload_errors import DuplicateUploadError
 from services.upload_handler import process_upload
+from services.upload_version import assess_upload_versioning
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
-VALID_TYPES = {"auto", ENTITY_STORY, ENTITY_FEATURE, ENTITY_TEST_CASE, ENTITY_API_SPEC, "api_endpoint"}
-VALID_VERSION_POLICIES = {"deprecate", "delete"}
+VALID_TYPES = {
+    "auto",
+    ENTITY_STORY,
+    ENTITY_FEATURE,
+    ENTITY_TEST_CASE,
+    ENTITY_API_SPEC,
+    "api_endpoint",
+    "bundle",
+}
+VALID_VERSION_POLICIES = {"deprecate", "delete", "replace"}
 
 
 def _duplicate_detail(duplicates: list[dict]) -> dict:
@@ -33,7 +42,7 @@ async def preview_upload(
     except Exception as e:
         raise HTTPException(400, str(e)) from e
     identity: list[dict] = []
-    if parsed["entity_type"] != ENTITY_API_SPEC:
+    if parsed["entity_type"] not in (ENTITY_API_SPEC, "bundle"):
         items, identity = resolve_upload_items(parsed["entity_type"], parsed["items"])
         parsed["items"] = items
         preview = dict(parsed.get("preview") or {})
@@ -45,9 +54,13 @@ async def preview_upload(
             preview["assigned_id"] = item[id_key]
         parsed["preview"] = preview
 
-    duplicates = check_parsed_upload(parsed, raw_bytes=content)
-    version_target = identity[0] if identity else {}
-    needs_version_decision = bool(version_target.get("is_version_update")) and not duplicates
+    duplicates = [] if parsed["entity_type"] == "bundle" else check_parsed_upload(parsed, raw_bytes=content)
+    assessment = (
+        {"needs_version_decision": False}
+        if parsed["entity_type"] == "bundle"
+        else assess_upload_versioning(parsed, identity, raw_bytes=content)
+    )
+    needs_version_decision = assessment["needs_version_decision"]
     return {
         "filename": file.filename,
         "entity_type": parsed["entity_type"],
@@ -58,10 +71,8 @@ async def preview_upload(
         "duplicates": duplicates,
         "identity": identity,
         "needs_version_decision": needs_version_decision,
-        "version_target": {
-            "base_id": version_target.get("assigned_id"),
-            "entity_type": version_target.get("entity_type"),
-        } if needs_version_decision else None,
+        "change_preview": assessment.get("change_preview"),
+        "version_target": assessment.get("version_target"),
     }
 
 
@@ -71,7 +82,10 @@ async def upload_file(
     entity_type: str = Query("auto"),
     story_id: str | None = Query(None),
     force: bool = Query(False, description="Upload anyway even if identical content exists"),
-    version_mode: str = Query("deprecate", description="deprecate or delete previous version"),
+    version_mode: str = Query(
+        "replace",
+        description="replace=update current in place; deprecate=archive old as new version; delete=remove old permanently",
+    ),
 ):
     if entity_type not in VALID_TYPES:
         raise HTTPException(400, f"entity_type must be one of: {', '.join(sorted(VALID_TYPES))}")

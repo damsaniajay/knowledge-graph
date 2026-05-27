@@ -12,13 +12,7 @@ const TYPE_COLORS = {
 };
 
 /** Top-to-bottom entity layers (matches schema hierarchy). */
-const TYPE_LAYER_ORDER = [
-  "UserStory",
-  "Feature",
-  "APIEndpoint",
-  "APIResponseSchema",
-  "TestCase",
-];
+const TYPE_LAYER_ORDER = ["UserStory", "Feature", "APIEndpoint", "TestCase"];
 
 const LAYER_LAYOUT = {
   gapY: 130,
@@ -43,7 +37,7 @@ const DELETE_TYPES = {
 
 let cy = null;
 let selectedNode = null;
-let lastGraph = { nodes: [], edges: [] };
+let lastGraph = { nodes: [], edges: [], scoped_to_story: false };
 const savedPositions = new Map();
 let highlightNodeId = null;
 let pendingFile = null;
@@ -51,6 +45,7 @@ let pendingVersionMode = null;
 let currentLayoutMode = "layered";
 let layoutRunning = false;
 let inventoryData = { nodes: [], total: 0, by_type: {} };
+let lastStoryFlowDelta = null;
 
 const UPLOAD_TYPE_LABELS = {
   user_story: "User Story",
@@ -58,13 +53,34 @@ const UPLOAD_TYPE_LABELS = {
   test_case: "Test Case",
   api_spec: "API Spec",
   api_endpoint: "API Endpoint",
+  bundle: "Bundle (API + features + story)",
 };
 
 const $ = (id) => document.getElementById(id);
 
+function selectedStoryNodeId() {
+  return $("storySelect").value || "";
+}
+
+function selectedStoryBaseId() {
+  const opt = $("storySelect").selectedOptions[0];
+  return opt?.dataset?.baseId || "";
+}
+
+/** Upload/manual APIs use story base_id (US1), not version node_id. */
 function storyParam() {
-  const sid = $("storySelect").value;
-  return sid ? `?story_id=${encodeURIComponent(sid)}` : "";
+  const baseId = selectedStoryBaseId();
+  return baseId ? `?story_id=${encodeURIComponent(baseId)}` : "";
+}
+
+function storyGraphParams() {
+  const nodeId = selectedStoryNodeId();
+  const baseId = selectedStoryBaseId();
+  const p = new URLSearchParams();
+  if (nodeId) p.set("story_node_id", nodeId);
+  if (baseId) p.set("story_id", baseId);
+  const q = p.toString();
+  return q ? `?${q}` : "";
 }
 
 function showToast(msg, type = "success") {
@@ -130,8 +146,8 @@ function hideDuplicateModal() {
 
 function uploadQueryParams() {
   const params = new URLSearchParams();
-  const sid = $("storySelect").value;
-  if (sid) params.set("story_id", sid);
+  const baseId = selectedStoryBaseId();
+  if (baseId) params.set("story_id", baseId);
   const forced = $("uploadType").value;
   if (forced && forced !== "auto") params.set("entity_type", forced);
   if (selectedNode) {
@@ -147,7 +163,7 @@ function updateUploadHint() {
   const hint = $("uploadHint");
   if (!selectedNode) {
     hint.textContent =
-      "Drop JSON/YAML — user story, feature, testcase, or OpenAPI spec (no flow files).";
+      "Drop JSON/YAML — bundle, user story, feature, testcase, or OpenAPI (no flow files).";
     return;
   }
   const tips = {
@@ -157,13 +173,31 @@ function updateUploadHint() {
   hint.textContent = tips[selectedNode.type] || `New nodes will appear beside ${selectedNode.label}.`;
 }
 
+function formatChangePreview(cp) {
+  if (!cp?.has_changes) return "";
+  const parts = [];
+  const names = (list) => (list || []).map((f) => f.name || f).filter(Boolean).join(", ");
+  const add = names(cp.added);
+  const mod = names(cp.modified);
+  const rem = names(cp.removed);
+  if (add) parts.push(`Added: ${add}`);
+  if (mod) parts.push(`Modified: ${mod}`);
+  if (rem) parts.push(`Removed: ${rem}`);
+  if (!parts.length && cp.change_type === "content") parts.push("Content changed");
+  return parts.join(" · ");
+}
+
 function askVersionMode(preview) {
   return new Promise((resolve) => {
     const modal = $("versionModeModal");
     const text = $("versionModeText");
     const id = preview?.version_target?.base_id || preview?.preview?.assigned_id || "this entity";
+    const delta = formatChangePreview(preview?.change_preview);
     if (text) {
-      text.textContent = `A previous version exists for ${id}. Deprecate keeps history and links old→new. Delete permanently removes old versions and stores this upload as v1.`;
+      text.textContent =
+        `Changes detected for ${id}${delta ? ` (${delta})` : ""}. ` +
+        "Deprecate saves a new version and keeps the previous node in the graph (archived). " +
+        "Delete permanently removes all older versions and replaces them with this upload as v1.";
     }
     const finish = (mode) => {
       modal?.classList.add("hidden");
@@ -191,6 +225,13 @@ function renderUploadPreview(data) {
     if (p.endpoints?.length) {
       rows += `<dt>Sample</dt><dd>${p.endpoints.map(escapeHtml).join("<br>")}</dd>`;
     }
+  } else if (data.entity_type === "bundle") {
+    rows = `
+      <dt>Bundle</dt><dd>${escapeHtml(p.title || "—")}</dd>
+      <dt>API endpoints</dt><dd>${p.endpoint_count || 0}</dd>
+      <dt>Features</dt><dd>${p.feature_count || 0}</dd>
+      <dt>Stories</dt><dd>${p.story_count || 0}</dd>
+      <dt>Test cases</dt><dd>${p.test_case_count || 0}</dd>`;
   } else {
     const entries = Object.entries(p).filter(([k]) => k !== "content_preview");
     rows = entries.map(([k, v]) => {
@@ -252,7 +293,10 @@ async function handleFileSelected(file) {
         return;
       }
       pendingVersionMode = mode;
-      const note = mode === "delete" ? "Delete old permanently" : "Deprecate old version";
+      const note =
+        mode === "delete"
+          ? "Delete old permanently (new v1)"
+          : "Deprecate — save as new version, keep history";
       $("uploadPreview").innerHTML += `<div class="hint" style="margin-top:.5rem">Version policy: ${escapeHtml(note)}</div>`;
     } else {
       pendingVersionMode = null;
@@ -275,14 +319,18 @@ async function uploadPendingFile() {
   try {
     const res = await apiForm(`/api/upload${uploadQueryParams()}`, fd);
     const newId = res.node_id;
-    const storyBaseId = storyIdFromUpload(res) || $("storySelect").value || null;
-    await reloadDashboard(newId, storyBaseId);
+    const storyNodeId = res.node_id || selectedStoryNodeId() || null;
+    if (res.story_flow_delta) {
+      lastStoryFlowDelta = res.story_flow_delta;
+    }
+    await reloadDashboard(newId, storyNodeId);
     const edgeMsg = res.edges_created?.length ? ` · ${res.edges_created.length} edge(s)` : "";
     const countMsg = res.count > 1 ? `${res.count} items` : res.base_id;
     const idMeta = res.identity?.[0];
     const deltaHint = idMeta?.delta_summary ? ` · ${idMeta.delta_summary}` : "";
     const verHint = idMeta?.is_version_update ? " (new version)" : "";
-    showToast(`Uploaded ${countMsg}${verHint} from file${edgeMsg}${deltaHint}`);
+    const baseToast = `Uploaded ${countMsg}${verHint} from file${edgeMsg}${deltaHint}`;
+    showToast(res.story_flow_delta?.has_changes ? res.message || baseToast : baseToast);
     clearPendingFile();
   } catch (err) {
     if (err.isDuplicate && err.duplicates?.length) {
@@ -357,8 +405,10 @@ async function loadStories() {
   sel.innerHTML = '<option value="">All nodes (full graph)</option>';
   for (const s of stories) {
     const opt = document.createElement("option");
-    opt.value = s.base_id;
-    opt.textContent = `${s.base_id} — ${s.title}`;
+    opt.value = s.node_id;
+    opt.dataset.baseId = s.base_id;
+    const archived = s.is_current === false;
+    opt.textContent = `${s.base_id} — ${s.title} v${s.version}${archived ? " (archived)" : ""}`;
     sel.appendChild(opt);
   }
   if (cur && [...sel.options].some((o) => o.value === cur)) sel.value = cur;
@@ -386,9 +436,59 @@ async function updatePersistenceStatus() {
   }
 }
 
-/** Always load every node from Neo4j — story filter only focuses the view, never hides data. */
+/** Full graph when no story selected; story subgraph when a story is chosen in the dropdown. */
 async function fetchGraph() {
-  return api("/api/graph");
+  const q = storyGraphParams();
+  return api(`/api/graph${q}`);
+}
+
+function applyStoryVersionDelta(delta) {
+  const banner = $("storyDeltaBanner");
+  if (!cy) return;
+
+  cy.elements().removeClass("version-added version-modified version-removed version-inactive");
+
+  if (!delta?.has_changes) {
+    banner?.classList.add("hidden");
+    if (banner) banner.innerHTML = "";
+    return;
+  }
+
+  const mark = (list, cls) => {
+    for (const f of list || []) {
+      if (!f?.node_id) continue;
+      const el = cy.getElementById(f.node_id);
+      if (el.length) el.addClass(cls);
+    }
+  };
+
+  mark(delta.added, "version-added");
+  mark(delta.modified, "version-modified");
+  mark(delta.removed, "version-removed version-inactive");
+
+  if (banner) {
+    const parts = [];
+    const add = (delta.added || []).map((f) => f.name).filter(Boolean);
+    const mod = (delta.modified || []).map((f) => f.name).filter(Boolean);
+    const rem = (delta.removed || []).map((f) => f.name).filter(Boolean);
+    if (add.length) {
+      parts.push(`<span class="delta-pill delta-add">+ Added: ${escapeHtml(add.join(", "))}</span>`);
+    }
+    if (mod.length) {
+      parts.push(`<span class="delta-pill delta-modify">◎ Modified: ${escapeHtml(mod.join(", "))}</span>`);
+    }
+    if (rem.length) {
+      parts.push(
+        `<span class="delta-pill delta-remove">− Removed (inactive): ${escapeHtml(rem.join(", "))}</span>`,
+      );
+    }
+    const ver =
+      delta.previous_version != null
+        ? `v${delta.previous_version} → v${delta.version}`
+        : `v${delta.version}`;
+    banner.innerHTML = `<span class="delta-title">Story flow change (${escapeHtml(ver)})</span>${parts.join("")}`;
+    banner.classList.remove("hidden");
+  }
 }
 
 /** Edge types that belong to a story's product graph (not cross-story/version links). */
@@ -399,6 +499,7 @@ const STORY_FOCUS_REL_TYPES = new Set([
   "NEXT_STEP",
   "HAS_RESPONSE_SCHEMA",
   "VALIDATES_AGAINST",
+  "PREVIOUS_VERSION",
 ]);
 
 /**
@@ -406,16 +507,19 @@ const STORY_FOCUS_REL_TYPES = new Set([
  * Does not walk DEPENDS_ON / BLOCKS / PREVIOUS_VERSION (those pull in other stories).
  */
 function storyFocusCollection(storyNodes) {
-  const storyBaseIds = new Set(
-    storyNodes
+  const storyNodeIds = new Set(storyNodes.map((n) => n.id()));
+  storyNodes.forEach((s) => {
+    if (s.data("type") !== "UserStory") return;
+    s.connectedEdges()
+      .filter((e) => e.data("rel_type") === "PREVIOUS_VERSION")
+      .connectedNodes()
       .filter((n) => n.data("type") === "UserStory")
-      .map((n) => n.data("base_id"))
-      .filter(Boolean),
-  );
+      .forEach((n) => storyNodeIds.add(n.id()));
+  });
 
   const allowNode = (n) => {
     if (n.data("type") !== "UserStory") return true;
-    return storyBaseIds.has(n.data("base_id"));
+    return storyNodeIds.has(n.id());
   };
 
   const relOk = (e) => STORY_FOCUS_REL_TYPES.has(e.data("rel_type"));
@@ -446,25 +550,49 @@ function storyFocusCollection(storyNodes) {
   return focusNodes.union(focusEdges);
 }
 
-function focusStoryView(storyBaseId) {
-  if (!cy || !storyBaseId) {
-    if (cy && cy.nodes().length) cy.fit(cy.elements(), 48);
+function focusStoryView(storyNodeId) {
+  if (!cy || !cy.nodes().length) return;
+  cy.elements().removeClass("dimmed");
+  if (!storyNodeId) {
+    cy.fit(cy.elements(), 48);
+    applyStoryVersionDelta(null);
     return;
   }
-  const story = cy.nodes().filter(
-    (n) => n.data("type") === "UserStory" && n.data("base_id") === storyBaseId,
-  );
+  const storyBaseId = selectedStoryBaseId();
+  if (lastGraph?.scoped_to_story) {
+    cy.fit(cy.elements(), 56);
+    if (lastStoryFlowDelta?.story_id === storyBaseId) {
+      applyStoryVersionDelta(lastStoryFlowDelta);
+    }
+    return;
+  }
+  const story = cy.nodes().filter((n) => n.data("type") === "UserStory" && n.id() === storyNodeId);
   if (!story.length) {
     cy.fit(cy.elements(), 48);
     return;
   }
-  const hood = storyFocusCollection(story);
+  let hood = storyFocusCollection(story);
+  if (lastStoryFlowDelta?.story_id === storyBaseId && lastStoryFlowDelta?.has_changes) {
+    const deltaIds = [
+      ...(lastStoryFlowDelta.added || []),
+      ...(lastStoryFlowDelta.modified || []),
+      ...(lastStoryFlowDelta.removed || []),
+    ]
+      .map((f) => f.node_id)
+      .filter(Boolean);
+    for (const id of deltaIds) {
+      const n = cy.getElementById(id);
+      if (n.length) hood = hood.union(n);
+    }
+  }
   const focusNodes = hood.nodes();
   const focusEdges = hood.edges();
-  cy.elements().removeClass("dimmed");
   cy.nodes().not(focusNodes).addClass("dimmed");
   cy.edges().not(focusEdges).addClass("dimmed");
   if (focusNodes.length) cy.fit(hood.nonempty() ? hood : story, 56);
+  if (lastStoryFlowDelta?.story_id === storyBaseId) {
+    applyStoryVersionDelta(lastStoryFlowDelta);
+  }
 }
 
 function clearStoryFocus() {
@@ -539,6 +667,49 @@ function initCytoscape() {
       {
         selector: "node.dimmed",
         style: { opacity: 0.35 },
+      },
+      {
+        selector: "node.archived-story, node.archived-version",
+        style: {
+          opacity: 0.78,
+          "border-style": "dashed",
+          "border-color": "#8b95ad",
+          "border-width": 3,
+        },
+      },
+      {
+        selector: "node.version-added",
+        style: {
+          "border-color": "#3ecf8e",
+          "border-width": 4,
+          width: 48,
+          height: 48,
+        },
+      },
+      {
+        selector: "node.version-modified",
+        style: {
+          "border-color": "#f5a623",
+          "border-width": 4,
+          width: 48,
+          height: 48,
+        },
+      },
+      {
+        selector: "node.version-removed",
+        style: {
+          opacity: 0.42,
+          "border-color": "#ef5f6b",
+          "border-width": 3,
+          "border-style": "dashed",
+        },
+      },
+      {
+        selector: "node.version-inactive",
+        style: {
+          "background-color": "#3a3f4a",
+          color: "#8b95ad",
+        },
       },
       {
         selector: "edge.dimmed",
@@ -770,7 +941,7 @@ function runGraphLayout(mode = currentLayoutMode, { reset = false } = {}) {
       if (mode === "layered") snapNodeToLayer(node);
       else savedPositions.set(node.id(), { ...node.position() });
     });
-    const sid = $("storySelect").value;
+    const sid = selectedStoryNodeId();
     if (sid) focusStoryView(sid);
     else cy.fit(cy.elements(), 48);
     layoutRunning = false;
@@ -852,12 +1023,18 @@ function applyGraph(graph, newNodeId = null) {
       }
       savedPositions.set(n.id, pos);
     }
+    const classes = [];
+    if (n.is_current === false) {
+      if (n.type === "UserStory") classes.push("archived-story");
+      else classes.push("archived-version");
+    }
     elements.push({
       group: "nodes",
+      classes: classes.join(" ") || undefined,
       data: {
         id: n.id,
         label: n.label,
-        caption: `${n.label}\nv${n.version}`,
+        caption: `${n.label}\nv${n.version}${n.is_current === false ? "\n(archived)" : ""}`,
         color: TYPE_COLORS[n.type] || "#888",
         ...n,
       },
@@ -888,9 +1065,19 @@ function applyGraph(graph, newNodeId = null) {
   } else {
     resizeGraphViewport();
     const sid = $("storySelect").value;
-    if (sid) focusStoryView(sid);
-    else if (cy.nodes().length) cy.fit(cy.elements(), 48);
+    if (sid) {
+      focusStoryView(sid);
+    } else if (cy.nodes().length) {
+      cy.fit(cy.elements(), 48);
+    }
   }
+
+  if (graph.story_flow_delta?.has_changes) {
+    lastStoryFlowDelta = graph.story_flow_delta;
+  } else if (graph.story_flow_delta) {
+    lastStoryFlowDelta = null;
+  }
+  applyStoryVersionDelta(lastStoryFlowDelta);
 
   if (newNodeId) {
     highlightNodeId = newNodeId;
@@ -911,13 +1098,13 @@ async function refreshGraph(newNodeId = null) {
 }
 
 /** Reload story list + fetch latest graph from Neo4j (use after any mutation). */
-async function reloadDashboard(highlightNodeId = null, storyBaseId = null) {
+async function reloadDashboard(highlightNodeId = null, storyNodeId = null) {
   await loadStories();
-  if (storyBaseId) {
+  if (storyNodeId) {
     const sel = $("storySelect");
-    if ([...sel.options].some((o) => o.value === storyBaseId)) {
-      sel.value = storyBaseId;
-      sessionStorage.setItem("kg_story_focus", storyBaseId);
+    if ([...sel.options].some((o) => o.value === storyNodeId)) {
+      sel.value = storyNodeId;
+      sessionStorage.setItem("kg_story_focus", storyNodeId);
     }
   }
   await loadNodeInventory();
@@ -1165,14 +1352,14 @@ $("addForm").addEventListener("submit", async (e) => {
   const body = collectFormData(e.target, type);
   let path = ADD_ENDPOINTS[type];
   const params = new URLSearchParams();
-  const sid = $("storySelect").value;
-  if (sid) params.set("story_id", sid);
+  const baseId = selectedStoryBaseId();
+  if (baseId) params.set("story_id", baseId);
   if (params.toString()) path += `?${params}`;
 
   try {
     const res = await api(path, { method: "POST", body: JSON.stringify(body) });
-    const storyBaseId = body.story_id || $("storySelect").value || null;
-    await reloadDashboard(res.node_id, storyBaseId);
+    const storyNodeId = res.node_id || selectedStoryNodeId() || null;
+    await reloadDashboard(res.node_id, storyNodeId);
     const edgeMsg = res.edges_created?.length ? ` · ${res.edges_created.length} edge(s) linked` : "";
     showToast(`${res.message === "created" ? "Added" : "Updated"} ${res.base_id}${edgeMsg}`);
   } catch (err) {
@@ -1235,7 +1422,7 @@ $("editForm").addEventListener("submit", async (e) => {
   try {
     const res = await api(endpoint + storyParam(), { method: "POST", body: JSON.stringify(body) });
     $("editModal").classList.add("hidden");
-    await reloadDashboard(res.node_id, $("storySelect").value || null);
+    await reloadDashboard(res.node_id, selectedStoryNodeId() || null);
     showToast(`Updated to v${res.version} in Neo4j`);
   } catch (err) {
     showToast(err.message, "error");
@@ -1271,7 +1458,7 @@ async function boot() {
     await loadStories();
     await loadNodeInventory();
     await refreshGraph();
-    const sid = $("storySelect").value;
+    const sid = selectedStoryNodeId();
     if (sid) focusStoryView(sid);
   } catch (e) {
     showToast("Load graph failed: " + e.message, "error");

@@ -15,9 +15,12 @@ from services.llm_client import LLMError, chat_json
 
 logger = logging.getLogger(__name__)
 
-_DEMO_FLOW_SEQUENCE = ["Login", "PlanFetch", "PlanSwitch", "Payment"]
+_DEMO_FLOW_SEQUENCE = ["Login", "PlanFetch", "PlanSwitch", "Payment", "Analytics"]
 
 _KEYWORD_TO_FEATURE = [
+    ("analytics", "Analytics"),
+    ("/analytics", "Analytics"),
+    ("usage insights", "Analytics"),
     ("login", "Login"),
     ("authenticate", "Login"),
     ("otp", "Login"),
@@ -40,7 +43,10 @@ _KEYWORD_TO_FEATURE = [
 _EXTRACT_SYSTEM = (
     "You are a QA architect. Extract the ordered user journey from a user story. "
     "Each step must be exactly one feature name from the provided catalog. "
-    "Omit features explicitly deferred or out of scope (e.g. payment in a later release). "
+    "Include every catalog feature whose APIs or behaviour are explicitly required in the story text "
+    "(e.g. if the story says POST /payments/pay, include Payment when it is in the catalog). "
+    "Only omit a feature when the story clearly defers it (e.g. 'payment deferred to a later release') "
+    "and does not call that feature's APIs. "
     "Return JSON only."
 )
 
@@ -91,6 +97,67 @@ def _payment_out_of_scope(content: str) -> bool:
     return any(m in lower for m in markers)
 
 
+def _flows_from_api_paths_in_content(story: dict) -> list[str]:
+    """Map features to story text by matching apis_used paths (deterministic)."""
+    content = (story.get("content") or "").lower()
+    if not content:
+        return []
+    try:
+        features = gs.get_all_features()
+    except Exception as e:
+        logger.warning("Could not load features for API path flow match: %s", e)
+        return []
+
+    hits: list[tuple[int, str]] = []
+    for feat in features:
+        name = (feat.get("name") or feat.get("base_id") or "").strip()
+        if not name:
+            continue
+        best_pos = None
+        for api in feat.get("apis_used") or []:
+            path = str(api).lower().strip()
+            if not path:
+                continue
+            pos = content.find(path)
+            if pos >= 0 and (best_pos is None or pos < best_pos):
+                best_pos = pos
+        if best_pos is not None:
+            hits.append((best_pos, name))
+
+    hits.sort(key=lambda x: x[0])
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, name in hits:
+        if name not in seen:
+            out.append(name)
+            seen.add(name)
+    return out
+
+
+def _insert_by_catalog_order(flows: list[str], name: str, catalog: list[str]) -> list[str]:
+    """Insert name into flows respecting catalog journey order."""
+    if name in flows:
+        return flows
+    if name not in catalog:
+        return flows + [name]
+    idx = catalog.index(name)
+    insert_at = len(flows)
+    for i, existing in enumerate(flows):
+        if existing in catalog and catalog.index(existing) > idx:
+            insert_at = i
+            break
+    out = list(flows)
+    out.insert(insert_at, name)
+    return out
+
+
+def _merge_flow_lists(primary: list[str], supplemental: list[str], catalog: list[str]) -> list[str]:
+    out = list(primary)
+    for name in supplemental:
+        out = _insert_by_catalog_order(out, name, catalog)
+    return _normalize_to_catalog(out, catalog)
+
+
 def derive_flows_heuristic(story: dict) -> list[str]:
     content = f"{story.get('title', '')} {story.get('content', '')}".lower()
     catalog = _feature_catalog()
@@ -107,7 +174,9 @@ def derive_flows_heuristic(story: dict) -> list[str]:
         ordered.append(feat)
         seen.add(feat)
 
-    return ordered
+    catalog = _feature_catalog()
+    from_apis = _flows_from_api_paths_in_content(story)
+    return _merge_flow_lists(ordered, from_apis, catalog)
 
 
 def derive_flows_llm(story: dict, *, current_flows: list[str] | None = None) -> dict:
@@ -187,21 +256,28 @@ def derive_flows(
         return [str(x) for x in existing]
 
     llm_on = config.USE_LLM_FLOWS if use_llm is None else use_llm
+    catalog = _feature_catalog()
+
     if llm_on and config.OPENAI_API_KEY:
         try:
             out = derive_flows_llm(story, current_flows=current_flows)
+            flows = _merge_flow_lists(
+                out["flows"],
+                _flows_from_api_paths_in_content(story),
+                catalog,
+            )
             story["_flow_derivation"] = {
                 "source": "llm",
                 "confidence": out.get("confidence"),
                 "evidence": out.get("evidence"),
             }
-            return out["flows"]
+            return flows
         except LLMError as e:
             logger.warning("LLM flow derivation failed, using heuristic: %s", e)
             story["_flow_derivation"] = {"source": "heuristic_fallback", "error": str(e)}
 
     flows = derive_flows_heuristic(story)
-    story["_flow_derivation"] = {"source": "heuristic"}
+    story["_flow_derivation"] = story.get("_flow_derivation") or {"source": "heuristic"}
     return flows
 
 

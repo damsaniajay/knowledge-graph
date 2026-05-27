@@ -1,0 +1,192 @@
+kind: knowledge_graph_bundle
+title: Plan Change — basic setup
+openapi:
+  openapi: 3.0.0
+  info:
+    title: Airtel Plan Change API
+    version: 1.0.0
+  paths:
+    /auth/login:
+      post:
+        summary: Authenticate user and return session token
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - password
+                properties:
+                  msisdn:
+                    type: string
+                  password:
+                    type: string
+        responses:
+          '200':
+            description: Login successful
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    token:
+                      type: string
+                    user_id:
+                      type: string
+          '401':
+            description: Invalid credentials
+    /auth/token/refresh:
+      post:
+        summary: Refresh session token
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - refresh_token
+                properties:
+                  refresh_token:
+                    type: string
+        responses:
+          '200':
+            description: Token refreshed
+    /plans:
+      get:
+        summary: Fetch plans — current or recommended (parameterized)
+        parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum:
+            - current
+            - recommended
+          required: true
+        - name: msisdn
+          in: query
+          schema:
+            type: string
+          required: true
+        responses:
+          '200':
+            description: Plans list
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    plans:
+                      type: array
+          '401':
+            description: Unauthorized — missing or invalid session
+    /plans/switch:
+      post:
+        summary: Create a plan switch order
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - plan_id
+                properties:
+                  msisdn:
+                    type: string
+                  plan_id:
+                    type: string
+        responses:
+          '200':
+            description: Order created
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    order_id:
+                      type: string
+          '400':
+            description: Invalid plan
+    /payments/pay:
+      post:
+        summary: Process payment for plan switch order
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                - payment_method
+                - amount
+                properties:
+                  order_id:
+                    type: string
+                  payment_method:
+                    type: string
+                    enum:
+                    - upi
+                    - card
+                    - wallet
+                  amount:
+                    type: number
+        responses:
+          '200':
+            description: Payment successful
+          '402':
+            description: Payment failed
+    /payments/activate:
+      post:
+        summary: Activate new plan after successful payment
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                properties:
+                  order_id:
+                    type: string
+        responses:
+          '200':
+            description: Plan activated
+          '404':
+            description: Order not found
+features:
+- name: Login
+  description: Authenticates the user and returns a session token
+  apis_used:
+  - /auth/login
+  - /auth/token/refresh
+  depends_on: []
+- name: Payment
+  description: Processes payment and activates the new plan
+  apis_used:
+  - /payments/pay
+  - /payments/activate
+  depends_on:
+  - PlanSwitch
+- name: PlanFetch
+  description: Fetches current and recommended plans for the subscriber
+  apis_used:
+  - /plans
+  depends_on:
+  - Login
+- name: PlanSwitch
+  description: Switches the subscriber to a selected plan
+  apis_used:
+  - /plans/switch
+  depends_on:
+  - PlanFetch
+user_story:
+  title: Plan Change
+  content: As a subscriber, I want to change my current mobile plan so that I can
+    get better benefits. The user must call POST /auth/login to authenticate, use
+    GET /plans to view current and recommended plans, POST /plans/switch to select
+    a new plan, then POST /payments/pay and POST /payments/activate to complete payment
+    and activation.
+  depends_on: []
+  blocked_by: []

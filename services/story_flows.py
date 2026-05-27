@@ -23,11 +23,6 @@ def prepare_story_flows(story: dict) -> tuple[dict, dict]:
         meta["flow_derivation"] = {"source": "file"}
         return story, meta
 
-    if config.FLOW_REQUIRE_APPROVAL:
-        story["flows"] = []
-        meta["needs_proposal"] = True
-        return story, meta
-
     story["flows"] = derive_flows(story)
     meta["flow_derivation"] = story.pop(
         "_flow_derivation",

@@ -5,6 +5,8 @@ One full re-sync per upload: refresh story flows (LLM) and rebuild all valid edg
 regardless of upload order (feature before/after story, API, test case, etc.).
 """
 
+import re
+
 from services import graph_service as gs
 from services.flow_derivation import derive_flows
 from services.graph_model import REL_BLOCKS, REL_DEPENDS_ON, REL_HAS_FEATURE
@@ -45,9 +47,6 @@ def _resync_graph() -> list:
 
     for ep in gs.get_all_endpoints():
         edges.extend(_link_endpoint_relationships(ep))
-
-    for schema in _all_response_schemas():
-        edges.extend(_link_response_schema_relationships(schema))
 
     for tc in gs.get_all_test_cases():
         edges.extend(_link_test_case_relationships(tc))
@@ -121,10 +120,16 @@ def _sync_story_flows_and_features(story_base_id: str) -> list:
         story_node = story["node_id"]
         flows = list(story.get("flows") or flows)
 
+    desired_feature_ids: set[str] = set()
     for feat in gs.get_all_features():
         if _feature_in_flows(feat, flows):
+            desired_feature_ids.add(feat["node_id"])
             if gs.create_edge(story_node, REL_HAS_FEATURE, feat["node_id"]):
                 _link(edges, (story_node, REL_HAS_FEATURE, feat["node_id"]))
+
+    for linked in gs.get_features_for_story(story_node):
+        if linked["node_id"] not in desired_feature_ids:
+            gs.delete_edge(story_node, REL_HAS_FEATURE, linked["node_id"])
 
     _create_next_step_chain(flows, edges)
     return edges
@@ -150,6 +155,17 @@ def _link_story_relationships(story: dict) -> list:
         if ep["path"] in content:
             if gs.create_edge(story_node, REL_USES_API, ep["node_id"]):
                 _link(edges, (story_node, REL_USES_API, ep["node_id"]))
+
+    # Even if flows[] are still pending/empty (FLOW_REQUIRE_APPROVAL=true),
+    # connect story -> features using the endpoints mentioned in the story text.
+    # This keeps feature-linked test cases reachable in the UI.
+    for feat in gs.get_all_features():
+        feat_node = feat["node_id"]
+        for path in feat.get("apis_used") or []:
+            if path and path.lower() in content:
+                if gs.create_edge(story_node, REL_HAS_FEATURE, feat_node):
+                    _link(edges, (story_node, REL_HAS_FEATURE, feat_node))
+                break
 
     for tc in gs.get_all_test_cases():
         if tc.get("linked_to") in (base_id, story.get("title")):
@@ -247,36 +263,111 @@ def _link_response_schema_relationships(schema: dict) -> list:
 
 
 def _link_test_case_relationships(tc: dict) -> list:
+    """
+    Ensure test cases connect in 3 ways:
+      1) UserStory -[:HAS_TEST_CASE]-> TestCase
+      2) Feature    -[:HAS_TEST_CASE]-> TestCase
+      3) APIEndpoint-[:HAS_TEST_CASE]-> TestCase
+    And:
+      4) TestCase -[:VALIDATES_AGAINST]-> APIResponseSchema (using HTTP status_code from expected_result)
+    """
     edges: list = []
     tc_node = tc["node_id"]
-    linked = tc.get("linked_to", "")
+
+    linked = (tc.get("linked_to") or "").strip()
     if not linked:
         return edges
 
+    expected_result = tc.get("expected_result") or ""
+    expected_code: int | None = None
+    # Prefer "HTTP 401" style.
+    m = re.search(r"HTTP\\s*([0-9]{3})", str(expected_result), flags=re.IGNORECASE)
+    if m:
+        expected_code = int(m.group(1))
+    else:
+        # Fallback: first 3-digit token (best-effort for "HTTP 200 — ...").
+        m2 = re.search(r"\\b([0-9]{3})\\b", str(expected_result))
+        if m2:
+            expected_code = int(m2.group(1))
+
     resolved = gs.resolve_entity(linked)
-    if resolved:
-        _, node = resolved
+    if not resolved:
+        return edges
+
+    label, node = resolved
+    endpoints: list[dict] = []
+
+    # Link TestCase based on resolved entity type.
+    if label == "Feature":
+        # Feature -> HAS_TEST_CASE
         if gs.create_edge(node["node_id"], REL_HAS_TEST_CASE, tc_node):
             _link(edges, (node["node_id"], REL_HAS_TEST_CASE, tc_node))
 
-    if tc.get("type") == "negative":
-        _link_negative_tc_to_schema(tc, tc_node, edges)
+        # Also link UserStories that include this feature.
+        for s in gs.get_stories_linking_feature(node["base_id"]):
+            if gs.create_edge(s["node_id"], REL_HAS_TEST_CASE, tc_node):
+                _link(edges, (s["node_id"], REL_HAS_TEST_CASE, tc_node))
+
+        # And connect APIEndpoint -> HAS_TEST_CASE (from feature.apis_used)
+        for path in node.get("apis_used") or []:
+            ep = gs.get_endpoint_by_path(path)
+            if not ep:
+                continue
+            endpoints.append(ep)
+            if gs.create_edge(ep["node_id"], REL_HAS_TEST_CASE, tc_node):
+                _link(edges, (ep["node_id"], REL_HAS_TEST_CASE, tc_node))
+
+    elif label == "UserStory":
+        # UserStory -> HAS_TEST_CASE
+        if gs.create_edge(node["node_id"], REL_HAS_TEST_CASE, tc_node):
+            _link(edges, (node["node_id"], REL_HAS_TEST_CASE, tc_node))
+
+        # Infer endpoints from story content.
+        content = str(node.get("content") or "").lower()
+        for ep in gs.get_all_endpoints():
+            if ep.get("path") and str(ep["path"]).lower() in content:
+                endpoints.append(ep)
+                if gs.create_edge(ep["node_id"], REL_HAS_TEST_CASE, tc_node):
+                    _link(edges, (ep["node_id"], REL_HAS_TEST_CASE, tc_node))
+
+    elif label == "APIEndpoint":
+        # APIEndpoint -> HAS_TEST_CASE
+        if gs.create_edge(node["node_id"], REL_HAS_TEST_CASE, tc_node):
+            _link(edges, (node["node_id"], REL_HAS_TEST_CASE, tc_node))
+        endpoints = [node]
+
+        # If the APIEndpoint is used by a story, link that story directly too.
+        for s in gs.get_stories_using_api(node["base_id"]):
+            if gs.create_edge(s["node_id"], REL_HAS_TEST_CASE, tc_node):
+                _link(edges, (s["node_id"], REL_HAS_TEST_CASE, tc_node))
+
+    # Link to response schema(s) based on expected HTTP code.
+    if endpoints:
+        for ep in endpoints:
+            schemas = gs.get_response_schemas_for_endpoint(ep["base_id"])
+
+            picked = None
+            if expected_code is not None:
+                for schema in schemas:
+                    try:
+                        if int(schema.get("status_code")) == expected_code:
+                            picked = schema
+                            break
+                    except Exception:
+                        continue
+
+            # If we couldn't match exact status, but it's a negative test, pick best-effort.
+            if not picked and tc.get("type") == "negative":
+                for schema in schemas:
+                    try:
+                        if int(schema.get("status_code", 200)) >= 400:
+                            picked = schema
+                            break
+                    except Exception:
+                        continue
+
+            if picked:
+                if gs.create_edge(tc_node, REL_VALIDATES_AGAINST, picked["node_id"]):
+                    _link(edges, (tc_node, REL_VALIDATES_AGAINST, picked["node_id"]))
 
     return edges
-
-
-def _link_negative_tc_to_schema(tc: dict, tc_node: str, edges: list) -> None:
-    linked = tc.get("linked_to", "")
-    ep = None
-    if ":" in linked:
-        ep = gs.get_endpoint_by_path(linked.split(":", 1)[1], linked.split(":", 1)[0])
-    else:
-        feat = gs.get_feature(linked) or gs.get_feature_by_name(linked)
-        if feat and feat.get("apis_used"):
-            ep = gs.get_endpoint_by_path(feat["apis_used"][0])
-    if not ep:
-        return
-    for schema in gs.get_response_schemas_for_endpoint(ep["base_id"]):
-        if schema.get("status_code", 200) >= 400:
-            if gs.create_edge(tc_node, REL_VALIDATES_AGAINST, schema["node_id"]):
-                _link(edges, (tc_node, REL_VALIDATES_AGAINST, schema["node_id"]))

@@ -24,6 +24,20 @@ _MATCH_SYSTEM = (
     "the same product entity with changed content. Return JSON only."
 )
 
+_LINK_TESTCASE_SYSTEM = (
+    "You are a knowledge-graph linker. Given a test case and a free-form linked_to hint, "
+    "choose which EXISTING entity (Feature, UserStory, or APIEndpoint) it is referring to. "
+    "Return JSON only.\n\n"
+    "Rules:\n"
+    "- If the linked_to hint already exactly matches an entity from the candidates, pick it.\n"
+    "- Otherwise, pick the closest match based on test case title/steps/content and entity names/paths.\n"
+    "- If no good match exists, return match_found=false.\n"
+    "- target_linked_to must be:\n"
+    "  - Feature: the Feature base_id\n"
+    "  - UserStory: the UserStory base_id\n"
+    "  - APIEndpoint: the APIEndpoint base_id in the form METHOD:/path\n"
+)
+
 
 def _slug(value: str, max_len: int = 32) -> str:
     s = re.sub(r"[^a-zA-Z0-9]+", "-", (value or "").strip()).strip("-").upper()
@@ -239,6 +253,169 @@ def _resolve_linked_to(linked: str) -> str:
     return linked
 
 
+def _tc_text_for_linking(item: dict) -> str:
+    title = str(item.get("title") or "")
+    expected = str(item.get("expected_result") or "")
+    steps = item.get("steps") or []
+    if isinstance(steps, list):
+        steps_text = " ".join(map(str, steps))
+    else:
+        steps_text = str(steps)
+    return f"{title}\n{expected}\n{steps_text}".strip()
+
+
+def _top_by_score(candidates: list[dict], score_fn, limit: int = 10) -> list[dict]:
+    scored = []
+    for c in candidates:
+        try:
+            scored.append((score_fn(c), c))
+        except Exception:
+            continue
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:limit]]
+
+
+def _llm_resolve_linked_to_for_test_case(item: dict, linked_to_input: str) -> dict | None:
+    """
+    Resolve a free-form `linked_to` (e.g. "Login" or "POST:/auth/login")
+    into an existing entity base_id so the relationship mapper can attach
+    the uploaded TestCase to the right Feature/UserStory/APIEndpoint.
+    """
+    linked_to_input = str(linked_to_input or "").strip()
+    if not linked_to_input:
+        return None
+
+    tc_text = _tc_text_for_linking(item).lower()
+
+    # Gather candidates from Neo4j.
+    try:
+        features = gs.get_all_features()
+        stories = gs.get_all_user_stories()
+        endpoints = gs.get_all_endpoints()
+    except Exception as e:
+        logger.warning("Could not load linking candidates from Neo4j: %s", e)
+        return None
+
+    def score_feature(f: dict) -> float:
+        name = str(f.get("name") or "")
+        base = str(f.get("base_id") or "")
+        apis = " ".join(map(str, f.get("apis_used") or []))
+        s = 0.0
+        if linked_to_input.lower() == base.lower():
+            s += 5
+        if linked_to_input.lower() == name.lower():
+            s += 4
+        if linked_to_input.lower() in name.lower():
+            s += 1.5
+        if apis and apis.lower() in tc_text:
+            s += 1.0
+        if name and name.lower() in tc_text:
+            s += 1.0
+        return s
+
+    def score_story(st: dict) -> float:
+        title = str(st.get("title") or "")
+        base = str(st.get("base_id") or "")
+        content_preview = str(st.get("content") or "")[:800]
+        s = 0.0
+        if linked_to_input.lower() == base.lower():
+            s += 5
+        if linked_to_input.lower() == title.lower():
+            s += 4
+        if title and linked_to_input.lower() in title.lower():
+            s += 1.5
+        if title and title.lower() in tc_text:
+            s += 1.0
+        if content_preview and content_preview.lower() in tc_text:
+            s += 0.5
+        return s
+
+    def score_endpoint(ep: dict) -> float:
+        base = str(ep.get("base_id") or "")
+        method = str(ep.get("method") or "")
+        path = str(ep.get("path") or "")
+        summary = str(ep.get("summary") or "")
+        s = 0.0
+        if linked_to_input.lower() == base.lower():
+            s += 6
+        if path and linked_to_input.lower() in path.lower():
+            s += 2.0
+        if method and linked_to_input.upper().startswith(method.upper()):
+            s += 1.0
+        if (method and method.lower() in tc_text) or (path and path.lower() in tc_text):
+            s += 1.5
+        if summary and summary.lower() in tc_text:
+            s += 0.5
+        return s
+
+    top_features = _top_by_score(features, score_feature, limit=12)
+    top_stories = _top_by_score(stories, score_story, limit=8)
+    top_endpoints = _top_by_score(endpoints, score_endpoint, limit=12)
+
+    # Truncate candidate fields to keep prompt small.
+    def tcand_feature(f: dict) -> dict:
+        return {
+            "base_id": f.get("base_id"),
+            "name": f.get("name"),
+            "apis_used": (f.get("apis_used") or [])[:6],
+        }
+
+    def tcand_story(s: dict) -> dict:
+        return {
+            "base_id": s.get("base_id"),
+            "title": s.get("title"),
+            "content_preview": (s.get("content") or "")[:500],
+        }
+
+    def tcand_endpoint(e: dict) -> dict:
+        return {
+            "base_id": e.get("base_id"),
+            "method": e.get("method"),
+            "path": e.get("path"),
+            "summary": (e.get("summary") or "")[:180],
+        }
+
+    candidates = {
+        "features": [tcand_feature(f) for f in top_features if f.get("base_id")],
+        "stories": [tcand_story(s) for s in top_stories if s.get("base_id")],
+        "endpoints": [tcand_endpoint(e) for e in top_endpoints if e.get("base_id")],
+    }
+
+    import json
+
+    user_prompt = f"""Test case (uploaded):
+{{
+  "title": {item.get("title", "")!r},
+  "type": {item.get("type", "")!r},
+  "linked_to_input": {linked_to_input!r},
+  "steps": {item.get("steps", [])!r},
+  "expected_result": {item.get("expected_result", "")!r}
+}}
+
+Existing entity candidates:
+{json.dumps(candidates, indent=2)}
+
+Return best match entity for test case.
+"""
+
+    try:
+        result = chat_json(_LINK_TESTCASE_SYSTEM, user_prompt)
+    except LLMError as e:
+        logger.warning("LLM linked_to match failed: %s", e)
+        return None
+
+    if not isinstance(result, dict):
+        return None
+    if not result.get("match_found"):
+        return None
+    if float(result.get("confidence", 0)) < 0.55:
+        return None
+    target = str(result.get("target_linked_to") or "").strip()
+    if not target:
+        return None
+    return result
+
+
 def resolve_test_case(item: dict) -> tuple[dict, dict]:
     hint_id = (item.get("tc_id") or "").strip() or None
     title = (item.get("title") or "").strip()
@@ -264,6 +441,20 @@ def resolve_test_case(item: dict) -> tuple[dict, dict]:
             if (tc.get("title") or "").strip() == title and (tc.get("linked_to") or "") == (item.get("linked_to") or ""):
                 matched = tc
                 break
+
+    # If linked_to still doesn't resolve to any existing entity, use LLM to map
+    # it to the closest existing Feature/UserStory/APIEndpoint.
+    if linked and not matched and config.use_llm_entity_match():
+        try:
+            resolved = gs.resolve_entity(str(item.get("linked_to") or "").strip())
+        except Exception:
+            resolved = None
+        if not resolved:
+            llm = _llm_resolve_linked_to_for_test_case(item, item.get("linked_to") or "")
+            if llm:
+                item["linked_to"] = llm.get("target_linked_to")
+                meta["linked_to_identity_source"] = "llm"
+                meta["linked_to_confidence"] = llm.get("confidence")
 
     if matched:
         item["tc_id"] = matched["base_id"]

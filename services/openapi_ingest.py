@@ -62,17 +62,31 @@ def _outcome_label(status_code: int, description: str) -> str:
     return (description or "outcome")[:40].replace(" ", "_").lower()
 
 
-def ingest_openapi(spec: dict, *, openapi_bundle_hash: str | None = None) -> dict:
+def ingest_openapi(
+    spec: dict,
+    *,
+    openapi_bundle_hash: str | None = None,
+    save_response_schemas: bool = False,
+    resync: bool = True,
+) -> dict:
     endpoints, schemas = parse_openapi(spec)
-    results = {"endpoints": [], "response_schemas": [], "edges_created": []}
+    results = {
+        "endpoints": [],
+        "response_schemas": [],
+        "endpoint_count": len(endpoints),
+        "schema_count": len(schemas),
+        "edges_created": [],
+    }
 
     for ep in endpoints:
         r = gs.save_endpoint(ep, openapi_bundle_hash=openapi_bundle_hash)
         results["endpoints"].append(r)
 
-    for sch in schemas:
-        r = gs.save_response_schema(sch)
-        results["response_schemas"].append(r)
+    if save_response_schemas:
+        for sch in schemas:
+            r = gs.save_response_schema(sch)
+            results["response_schemas"].append(r)
 
-    results["edges_created"] = linker.resync_graph()
+    if resync:
+        results["edges_created"] = linker.resync_graph()
     return results

@@ -35,7 +35,7 @@ status: $status,
 CYPHER_EDGE_CREATE_TEMPORAL = """
 r.valid_from = $now,
 r.valid_to = null,
-r.status = $status,
+r.status = $status
 """
 
 # History SELECT (returns canonical names)

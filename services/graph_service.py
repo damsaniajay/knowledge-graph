@@ -100,7 +100,11 @@ def _allocate_version(
     version_policy:
       - deprecate: keep old versions archived, new becomes v+1
       - delete: hard-delete all previous versions for this base_id, new becomes v1
+      - replace: only used when creating first version (treated as deprecate, nothing to archive)
     """
+    if version_policy == "replace":
+        version_policy = "deprecate"
+
     prev_node_id = None
 
     if version_policy == "delete":
@@ -133,7 +137,12 @@ def _expire_current(session, label: str, base_id: str, now: str) -> str | None:
         f"MATCH (n:{label} {{base_id: $base_id, is_current: true}}) RETURN n.node_id AS id LIMIT 1",
         base_id=base_id,
     ).single()
-    extra = ", n.endpoint_id = n.node_id" if label == "APIEndpoint" else ""
+    extra = ""
+    if label == "APIEndpoint":
+        extra = ", n.endpoint_id = n.node_id"
+    elif label == "Feature":
+        # Free Feature.name for the next version (legacy DBs had UNIQUE(name)).
+        extra = ", n.archived_name = coalesce(n.archived_name, n.name), n.name = n.node_id"
     session.run(
         f"MATCH (n:{label} {{base_id: $base_id, is_current: true}}) "
         f"SET {CYPHER_EXPIRE_NODE_SET}{extra} "
@@ -228,7 +237,7 @@ def save_user_story(
     story: dict,
     created_by: str = "system",
     *,
-    version_policy: str = "deprecate",
+    version_policy: str = "replace",
 ) -> dict:
     base_id = story["story_id"]
     now = _now()
@@ -236,6 +245,52 @@ def save_user_story(
     content_hash = hash_user_story(story)
 
     with _get_driver().session() as session:
+        if version_policy == "replace":
+            row = session.run(
+                "MATCH (n:UserStory {base_id:$b, is_current:true}) "
+                "RETURN n.node_id AS node_id, n.version AS version LIMIT 1",
+                b=base_id,
+            ).single()
+            if row:
+                node_id = row["node_id"]
+                new_v = row["version"]
+                session.run(
+                    """
+                    MATCH (n:UserStory {node_id: $node_id})
+                    SET n.title = $title, n.content = $content, n.flows = $flows,
+                        n.depends_on = $depends_on, n.blocked_by = $blocked_by,
+                        n.content_hash = $content_hash,
+                        n.updated_at = $now, n.updated_by = $updated_by
+                    """,
+                    node_id=node_id,
+                    title=story["title"],
+                    content=story.get("content", ""),
+                    flows=flows,
+                    depends_on=story.get("depends_on", []),
+                    blocked_by=story.get("blocked_by", []),
+                    content_hash=content_hash,
+                    now=now,
+                    updated_by=created_by,
+                )
+                result = {
+                    "node_id": node_id,
+                    "version": new_v,
+                    "is_new": False,
+                    "flows": flows,
+                    "replaced": True,
+                }
+                _track_version_saved(
+                    "user_story",
+                    base_id,
+                    story,
+                    result,
+                    content_hash=content_hash,
+                    version_policy=version_policy,
+                    created_by=created_by,
+                    valid_from=now,
+                )
+                return result
+
         new_v, node_id, is_new, prev_node_id = _allocate_version(
             session, "UserStory", base_id, now, version_policy=version_policy
         )
@@ -266,7 +321,7 @@ def save_user_story(
             now=now,
             **_base_audit(now, created_by),
         )
-        if version_policy != "delete":
+        if version_policy == "deprecate" and prev_node_id:
             _link_previous_version(session, node_id, prev_node_id, now)
     result = {"node_id": node_id, "version": new_v, "is_new": is_new, "flows": flows}
     _track_version_saved(
@@ -282,12 +337,23 @@ def save_user_story(
     return result
 
 
+def get_current_content_hash(label: str, base_id: str) -> str | None:
+    with _get_driver().session() as session:
+        r = session.run(
+            f"MATCH (n:{label} {{base_id:$b, is_current:true}}) "
+            "RETURN n.content_hash AS h LIMIT 1",
+            b=base_id,
+        ).single()
+        return r["h"] if r else None
+
+
 def get_user_story(base_id: str) -> dict | None:
     with _get_driver().session() as session:
         r = session.run(
             "MATCH (n:UserStory {base_id:$b, is_current:true}) "
             "RETURN n.node_id AS node_id, n.base_id AS base_id, n.title AS title, "
             "n.content AS content, n.flows AS flows, n.version AS version, "
+            "n.content_hash AS content_hash, "
             "n.depends_on AS depends_on, n.blocked_by AS blocked_by, "
             "coalesce(n.valid_from, n.valid_at) AS valid_from",
             b=base_id,
@@ -296,12 +362,47 @@ def get_user_story(base_id: str) -> dict | None:
 
 
 def get_all_user_stories() -> list[dict]:
+    """Current (active) user story versions only — used for linking and identity."""
     with _get_driver().session() as session:
         return [dict(r) for r in session.run(
             "MATCH (n:UserStory {is_current:true}) "
             "RETURN n.node_id AS node_id, n.base_id AS base_id, n.title AS title, "
             "n.flows AS flows, n.version AS version"
         )]
+
+
+def list_user_story_versions() -> list[dict]:
+    """Every UserStory version (current + archived) for UI dropdown and graph."""
+    with _get_driver().session() as session:
+        return [dict(r) for r in session.run(
+            "MATCH (n:UserStory) "
+            "RETURN n.node_id AS node_id, n.base_id AS base_id, n.title AS title, "
+            "n.flows AS flows, n.version AS version, n.is_current AS is_current, "
+            "n.status AS status "
+            "ORDER BY n.base_id, n.version"
+        )]
+
+
+def get_user_story_version(node_id: str) -> dict | None:
+    with _get_driver().session() as session:
+        r = session.run(
+            "MATCH (n:UserStory {node_id:$id}) "
+            "RETURN n.node_id AS node_id, n.base_id AS base_id, n.title AS title, "
+            "n.content AS content, n.flows AS flows, n.version AS version, "
+            "n.is_current AS is_current, n.status AS status, "
+            "coalesce(n.valid_from, n.valid_at) AS valid_from",
+            id=node_id,
+        ).single()
+        return dict(r) if r else None
+
+
+def user_story_base_id_exists(base_id: str) -> bool:
+    with _get_driver().session() as session:
+        r = session.run(
+            "MATCH (n:UserStory {base_id:$b}) RETURN n LIMIT 1",
+            b=base_id,
+        ).single()
+        return bool(r)
 
 
 def get_user_story_history(base_id: str) -> list[dict]:
@@ -321,13 +422,58 @@ def save_feature(
     feature: dict,
     created_by: str = "system",
     *,
-    version_policy: str = "deprecate",
+    version_policy: str = "replace",
 ) -> dict:
     base_id = feature["feature_id"]
     now = _now()
     content_hash = hash_feature(feature)
 
     with _get_driver().session() as session:
+        if version_policy == "replace":
+            row = session.run(
+                "MATCH (n:Feature {base_id:$b, is_current:true}) "
+                "RETURN n.node_id AS node_id, n.version AS version LIMIT 1",
+                b=base_id,
+            ).single()
+            if row:
+                node_id = row["node_id"]
+                new_v = row["version"]
+                session.run(
+                    """
+                    MATCH (n:Feature {node_id: $node_id})
+                    SET n.name = $name, n.description = $description,
+                        n.apis_used = $apis_used, n.depends_on = $depends_on,
+                        n.order = $order, n.content_hash = $content_hash,
+                        n.updated_at = $now, n.updated_by = $updated_by
+                    """,
+                    node_id=node_id,
+                    name=feature["name"],
+                    description=feature.get("description", ""),
+                    apis_used=feature.get("apis_used", []),
+                    depends_on=feature.get("depends_on", []),
+                    order=feature.get("order", 0),
+                    content_hash=content_hash,
+                    now=now,
+                    updated_by=created_by,
+                )
+                result = {
+                    "node_id": node_id,
+                    "version": new_v,
+                    "is_new": False,
+                    "replaced": True,
+                }
+                _track_version_saved(
+                    "feature",
+                    base_id,
+                    feature,
+                    result,
+                    content_hash=content_hash,
+                    version_policy=version_policy,
+                    created_by=created_by,
+                    valid_from=now,
+                )
+                return result
+
         new_v, node_id, is_new, prev_node_id = _allocate_version(
             session, "Feature", base_id, now, version_policy=version_policy
         )
@@ -358,7 +504,7 @@ def save_feature(
             now=now,
             **_base_audit(now, created_by),
         )
-        if version_policy != "delete":
+        if version_policy == "deprecate" and prev_node_id:
             _link_previous_version(session, node_id, prev_node_id, now)
     result = {"node_id": node_id, "version": new_v, "is_new": is_new}
     _track_version_saved(
@@ -424,13 +570,59 @@ def save_endpoint(
     created_by: str = "system",
     *,
     openapi_bundle_hash: str | None = None,
-    version_policy: str = "deprecate",
+    version_policy: str = "replace",
 ) -> dict:
     base_id = f"{endpoint['method'].upper()}:{endpoint['path']}"
     now = _now()
     content_hash = hash_api_endpoint(endpoint)
 
     with _get_driver().session() as session:
+        if version_policy == "replace":
+            row = session.run(
+                "MATCH (n:APIEndpoint {base_id:$b, is_current:true}) "
+                "RETURN n.node_id AS node_id, n.version AS version LIMIT 1",
+                b=base_id,
+            ).single()
+            if row:
+                node_id = row["node_id"]
+                new_v = row["version"]
+                session.run(
+                    """
+                    MATCH (n:APIEndpoint {node_id: $node_id})
+                    SET n.path = $path, n.method = $method, n.summary = $summary,
+                        n.request_schema = $request_schema, n.content_hash = $content_hash,
+                        n.openapi_bundle_hash = $openapi_bundle_hash,
+                        n.updated_at = $now, n.updated_by = $updated_by
+                    """,
+                    node_id=node_id,
+                    path=endpoint["path"],
+                    method=endpoint["method"].upper(),
+                    summary=endpoint.get("summary", ""),
+                    request_schema=json.dumps(endpoint.get("request_schema", {})),
+                    content_hash=content_hash,
+                    openapi_bundle_hash=openapi_bundle_hash or "",
+                    now=now,
+                    updated_by=created_by,
+                )
+                result = {
+                    "node_id": node_id,
+                    "base_id": base_id,
+                    "version": new_v,
+                    "is_new": False,
+                    "replaced": True,
+                }
+                _track_version_saved(
+                    "api_endpoint",
+                    base_id,
+                    endpoint,
+                    result,
+                    content_hash=content_hash,
+                    version_policy=version_policy,
+                    created_by=created_by,
+                    valid_from=now,
+                )
+                return result
+
         new_v, node_id, is_new, prev_node_id = _allocate_version(
             session, "APIEndpoint", base_id, now, version_policy=version_policy
         )
@@ -462,7 +654,7 @@ def save_endpoint(
             now=now,
             **_base_audit(now, created_by),
         )
-        if version_policy != "delete":
+        if version_policy == "deprecate" and prev_node_id:
             _link_previous_version(session, node_id, prev_node_id, now)
     result = {"node_id": node_id, "base_id": base_id, "version": new_v, "is_new": is_new}
     _track_version_saved(
@@ -565,7 +757,7 @@ def save_response_schema(
             now=now,
             **_base_audit(now, created_by),
         )
-        if version_policy != "delete":
+        if version_policy == "deprecate" and prev_node_id:
             _link_previous_version(session, node_id, prev_node_id, now)
     result = {"node_id": node_id, "base_id": base_id, "version": new_v, "is_new": is_new}
     _track_version_saved(
@@ -597,13 +789,60 @@ def save_test_case(
     tc: dict,
     created_by: str = "system",
     *,
-    version_policy: str = "deprecate",
+    version_policy: str = "replace",
 ) -> dict:
     base_id = tc["tc_id"]
     now = _now()
     content_hash = hash_test_case(tc)
 
     with _get_driver().session() as session:
+        if version_policy == "replace":
+            row = session.run(
+                "MATCH (n:TestCase {base_id:$b, is_current:true}) "
+                "RETURN n.node_id AS node_id, n.version AS version LIMIT 1",
+                b=base_id,
+            ).single()
+            if row:
+                node_id = row["node_id"]
+                new_v = row["version"]
+                session.run(
+                    """
+                    MATCH (n:TestCase {node_id: $node_id})
+                    SET n.title = $title, n.type = $type, n.test_layer = $test_layer,
+                        n.linked_to = $linked_to, n.steps = $steps,
+                        n.expected_result = $expected_result,
+                        n.content_hash = $content_hash,
+                        n.updated_at = $now, n.updated_by = $updated_by
+                    """,
+                    node_id=node_id,
+                    title=tc["title"],
+                    type=tc.get("type", "positive"),
+                    test_layer=tc.get("test_layer", "api"),
+                    linked_to=tc.get("linked_to", ""),
+                    steps=json.dumps(tc.get("steps", [])),
+                    expected_result=tc.get("expected_result", ""),
+                    content_hash=content_hash,
+                    now=now,
+                    updated_by=created_by,
+                )
+                result = {
+                    "node_id": node_id,
+                    "version": new_v,
+                    "is_new": False,
+                    "replaced": True,
+                }
+                _track_version_saved(
+                    "test_case",
+                    base_id,
+                    tc,
+                    result,
+                    content_hash=content_hash,
+                    version_policy=version_policy,
+                    created_by=created_by,
+                    valid_from=now,
+                )
+                return result
+
         new_v, node_id, is_new, prev_node_id = _allocate_version(
             session, "TestCase", base_id, now, version_policy=version_policy
         )
@@ -636,7 +875,7 @@ def save_test_case(
             now=now,
             **_base_audit(now, created_by),
         )
-        if version_policy != "delete":
+        if version_policy == "deprecate" and prev_node_id:
             _link_previous_version(session, node_id, prev_node_id, now)
     result = {"node_id": node_id, "version": new_v, "is_new": is_new}
     _track_version_saved(
@@ -692,12 +931,16 @@ def get_test_case_history(base_id: str) -> list[dict]:
 # ─── Edges ───────────────────────────────────────────────────────────────────
 
 def prune_edges_on_archived_nodes() -> int:
-    """Remove relationships touching non-current nodes (leftover after versioning)."""
+    """Remove relationships touching archived non-story nodes.
+
+    Archived UserStory versions keep their edges so both versions stay visible in the graph.
+    """
     with _get_driver().session() as session:
         result = session.run(
             """
             MATCH (a)-[r]->(b)
-            WHERE coalesce(a.is_current, true) = false OR coalesce(b.is_current, true) = false
+            WHERE (coalesce(a.is_current, true) = false OR coalesce(b.is_current, true) = false)
+              AND NOT a:UserStory AND NOT b:UserStory
             DELETE r
             """
         )
@@ -784,7 +1027,7 @@ def delete_node(entity_type: str, base_id: str) -> dict:
 
 def list_current_nodes() -> dict:
     """Inventory of all current (is_current) nodes in the knowledge graph."""
-    labels = ["UserStory", "Feature", "APIEndpoint", "APIResponseSchema", "TestCase"]
+    labels = ["UserStory", "Feature", "APIEndpoint", "TestCase"]
     nodes = []
     by_type: dict[str, int] = {}
 
@@ -880,6 +1123,15 @@ def get_features_using_api(api_base_id: str) -> list[dict]:
         )]
 
 
+def get_stories_using_api(api_base_id: str) -> list[dict]:
+    with _get_driver().session() as session:
+        return [dict(r) for r in session.run(
+            "MATCH (s:UserStory {is_current:true})-[:USES_API]->(ep:APIEndpoint {base_id:$b}) "
+            "RETURN DISTINCT s.node_id AS node_id, s.base_id AS base_id, s.title AS title",
+            b=api_base_id,
+        )]
+
+
 def get_stories_linking_feature(feature_base_id: str) -> list[dict]:
     with _get_driver().session() as session:
         return [dict(r) for r in session.run(
@@ -929,7 +1181,8 @@ LABEL_TO_TYPE = {
 
 def _node_display_label(props: dict) -> str:
     return (
-        props.get("title")
+        props.get("archived_name")
+        or props.get("title")
         or props.get("name")
         or props.get("outcome_label")
         or (f"{props.get('method', '')} {props.get('path', '')}".strip())
@@ -959,35 +1212,84 @@ def _serialize_props(props: dict) -> dict:
     return out
 
 
-def get_full_graph(story_base_id: str | None = None) -> dict:
+_GRAPH_LABELS = "['UserStory','Feature','APIEndpoint','TestCase']"
+
+_STORY_SUBGRAPH_RELS = [
+    "HAS_FEATURE",
+    "USES_API",
+    "HAS_TEST_CASE",
+    "NEXT_STEP",
+    "DEPENDS_ON",
+    "PREVIOUS_VERSION",
+]
+
+_CYPHER_GRAPH_EDGE_FILTER = f"""
+(
+  type(r) = 'PREVIOUS_VERSION'
+  OR {CYPHER_ACTIVE_EDGE}
+  OR (a:UserStory AND coalesce(a.is_current, false) = false)
+  OR (b:UserStory AND coalesce(b.is_current, false) = false)
+  OR (a:Feature AND coalesce(a.is_current, false) = false)
+  OR (b:Feature AND coalesce(b.is_current, false) = false)
+)
+"""
+
+
+def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
+    """BFS from seed story node(s) over product relationships (no response-schema layer)."""
+    ids = {i for i in seed_ids if i}
+    frontier = set(ids)
+    rels = _STORY_SUBGRAPH_RELS
+    while frontier:
+        rows = session.run(
+            """
+            MATCH (a)-[r]-(b)
+            WHERE a.node_id IN $frontier AND type(r) IN $rels
+              AND NOT b:APIResponseSchema
+              AND any(l IN labels(b) WHERE l IN ['UserStory','Feature','APIEndpoint','TestCase'])
+            RETURN DISTINCT b.node_id AS id
+            """,
+            frontier=list(frontier),
+            rels=rels,
+        )
+        next_frontier: set[str] = set()
+        for row in rows:
+            nid = row["id"]
+            if nid and nid not in ids:
+                ids.add(nid)
+                next_frontier.add(nid)
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return ids
+
+
+def get_story_subgraph(story_node_id: str) -> dict:
+    """Only nodes and edges reachable from one UserStory version (for story-focused UI)."""
     nodes, edges = [], []
     seen_n, seen_e = set(), set()
 
     with _get_driver().session() as session:
-        if story_base_id:
-            rows = session.run(
-                """
-                MATCH (s:UserStory {base_id: $bid, is_current: true})
-                OPTIONAL MATCH (s)-[*0..5]-(n)
-                WHERE n IS NULL OR n.is_current = true
-                WITH collect(DISTINCT s) + collect(DISTINCT n) AS all_nodes
-                UNWIND all_nodes AS node
-                WITH node WHERE node IS NOT NULL
-                RETURN labels(node)[0] AS type, node.node_id AS id, node.base_id AS base_id,
-                       node.version AS version, properties(node) AS props
-                """,
-                bid=story_base_id,
-            )
-        else:
-            rows = session.run(
-                """
-                MATCH (n) WHERE n.is_current = true
-                AND any(l IN labels(n) WHERE l IN
-                  ['UserStory','Feature','APIEndpoint','APIResponseSchema','TestCase'])
-                RETURN labels(n)[0] AS type, n.node_id AS id, n.base_id AS base_id,
-                       n.version AS version, properties(n) AS props
-                """
-            )
+        seed = session.run(
+            "MATCH (n:UserStory {node_id: $id}) RETURN n.node_id AS id LIMIT 1",
+            id=story_node_id,
+        ).single()
+        if not seed:
+            return {"nodes": [], "edges": [], "story_id": None, "scoped_to_story": True}
+
+        node_ids = _collect_subgraph_node_ids(session, [story_node_id])
+
+        rows = session.run(
+            f"""
+            MATCH (n)
+            WHERE n.node_id IN $ids
+              AND any(l IN labels(n) WHERE l IN {_GRAPH_LABELS})
+            RETURN labels(n)[0] AS type, n.node_id AS id, n.base_id AS base_id,
+                   n.version AS version, n.is_current AS is_current, n.status AS status,
+                   properties(n) AS props
+            """,
+            ids=list(node_ids),
+        )
 
         for row in rows:
             nid = row["id"]
@@ -1003,6 +1305,8 @@ def get_full_graph(story_base_id: str | None = None) -> dict:
                 "entity_type": LABEL_TO_TYPE.get(ntype, ntype.lower()),
                 "label": _node_display_label(props),
                 "version": row["version"],
+                "is_current": bool(row["is_current"]) if row["is_current"] is not None else True,
+                "status": row["status"],
                 "properties": _serialize_props(props),
             })
 
@@ -1010,7 +1314,79 @@ def get_full_graph(story_base_id: str | None = None) -> dict:
             for row in session.run(
                 f"""
                 MATCH (a)-[r]->(b)
-                WHERE a.node_id IN $ids AND b.node_id IN $ids AND {CYPHER_ACTIVE_EDGE}
+                WHERE a.node_id IN $ids AND b.node_id IN $ids
+                  AND type(r) IN $rels
+                RETURN a.node_id AS source, b.node_id AS target, type(r) AS rel_type
+                """,
+                ids=list(seen_n),
+                rels=_STORY_SUBGRAPH_RELS,
+            ):
+                key = f"{row['source']}|{row['rel_type']}|{row['target']}"
+                if key in seen_e:
+                    continue
+                seen_e.add(key)
+                edges.append({
+                    "id": key,
+                    "source": row["source"],
+                    "target": row["target"],
+                    "rel_type": row["rel_type"],
+                })
+
+        story_base = session.run(
+            "MATCH (n:UserStory {node_id: $id}) RETURN n.base_id AS b",
+            id=story_node_id,
+        ).single()
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "story_id": story_base["b"] if story_base else None,
+        "focus_story_node_id": story_node_id,
+        "scoped_to_story": True,
+    }
+
+
+def get_full_graph(story_base_id: str | None = None) -> dict:
+    """Export graph: every version of every KG node (current + archived), no response-schema layer."""
+    nodes, edges = [], []
+    seen_n, seen_e = set(), set()
+
+    with _get_driver().session() as session:
+        rows = session.run(
+            f"""
+            MATCH (n)
+            WHERE any(l IN labels(n) WHERE l IN {_GRAPH_LABELS})
+            RETURN labels(n)[0] AS type, n.node_id AS id, n.base_id AS base_id,
+                   n.version AS version, n.is_current AS is_current, n.status AS status,
+                   properties(n) AS props
+            """
+        )
+
+        for row in rows:
+            nid = row["id"]
+            if not nid or nid in seen_n:
+                continue
+            seen_n.add(nid)
+            props = dict(row["props"] or {})
+            ntype = row["type"]
+            nodes.append({
+                "id": nid,
+                "base_id": row["base_id"],
+                "type": ntype,
+                "entity_type": LABEL_TO_TYPE.get(ntype, ntype.lower()),
+                "label": _node_display_label(props),
+                "version": row["version"],
+                "is_current": bool(row["is_current"]) if row["is_current"] is not None else True,
+                "status": row["status"],
+                "properties": _serialize_props(props),
+            })
+
+        if seen_n:
+            for row in session.run(
+                f"""
+                MATCH (a)-[r]->(b)
+                WHERE a.node_id IN $ids AND b.node_id IN $ids
+                  AND {_CYPHER_GRAPH_EDGE_FILTER}
                 RETURN a.node_id AS source, b.node_id AS target, type(r) AS rel_type
                 """,
                 ids=list(seen_n),
@@ -1026,7 +1402,7 @@ def get_full_graph(story_base_id: str | None = None) -> dict:
                     "rel_type": row["rel_type"],
                 })
 
-    return {"nodes": nodes, "edges": edges, "story_id": story_base_id}
+    return {"nodes": nodes, "edges": edges, "story_id": story_base_id, "scoped_to_story": False}
 
 
 def check_connection() -> dict:

@@ -3,6 +3,32 @@
 from services import graph_service
 
 
+def _drop_property_unique(session, label: str, prop: str) -> None:
+    """Drop mistaken per-label property UNIQUE constraints (only node_id should be unique)."""
+    try:
+        rows = list(session.run("SHOW CONSTRAINTS"))
+    except Exception as e:
+        print(f"  [skip] SHOW CONSTRAINTS — {e}")
+        return
+
+    for row in rows:
+        data = dict(row)
+        name = data.get("name")
+        labels = data.get("labelsOrTypes") or data.get("entityType") or []
+        props = data.get("properties") or data.get("propertyNames") or []
+        if isinstance(labels, str):
+            labels = [labels]
+        if label not in labels:
+            continue
+        if props != [prop]:
+            continue
+        try:
+            session.run(f"DROP CONSTRAINT `{name}` IF EXISTS")
+            print(f"  ✓ DROPPED legacy CONSTRAINT ({name}) on {label}.{prop}")
+        except Exception as e:
+            print(f"  [warn] could not drop {name}: {e}")
+
+
 def _drop_legacy_endpoint_id_unique(session) -> None:
     """
     Older setups created UNIQUE(APIEndpoint.endpoint_id). That breaks versioning
@@ -61,6 +87,8 @@ def setup() -> None:
     driver = graph_service._get_driver()
     with driver.session() as session:
         _drop_legacy_endpoint_id_unique(session)
+        _drop_property_unique(session, "Feature", "name")
+        _drop_property_unique(session, "UserStory", "title")
 
         for label, prop in constraints:
             try:
@@ -94,6 +122,54 @@ def setup() -> None:
     print("  Note: API spec v2 re-upload versions endpoints by base_id (METHOD:path), not duplicate insert.")
 
 
+def repair_feature_name_collisions() -> dict:
+    """Archived features still holding display name block new versions (legacy UNIQUE on name)."""
+    driver = graph_service._get_driver()
+    with driver.session() as session:
+        _drop_property_unique(session, "Feature", "name")
+        result = session.run(
+            """
+            MATCH (n:Feature)
+            WHERE n.is_current = false
+            WITH n, coalesce(n.archived_name, n.name) AS display
+            WHERE display <> n.node_id AND n.name = display
+            SET n.archived_name = display, n.name = n.node_id
+            RETURN count(n) AS c
+            """
+        ).single()
+        fixed = int(result["c"]) if result else 0
+    return {"archived_features_repaired": fixed}
+
+
+def repair_orphaned_current_features() -> dict:
+    """
+    If a deprecate upload archived the old node but failed before creating the new one,
+    restore the latest archived version as current.
+    """
+    driver = graph_service._get_driver()
+    with driver.session() as session:
+        result = session.run(
+            """
+            MATCH (n:Feature)
+            WITH n.base_id AS bid
+            WHERE NOT EXISTS {
+                MATCH (c:Feature {base_id: bid, is_current: true})
+            }
+            MATCH (arch:Feature {base_id: bid})
+            WHERE arch.is_current = false
+            WITH bid, arch ORDER BY arch.version DESC
+            WITH bid, collect(arch)[0] AS latest
+            SET latest.is_current = true,
+                latest.status = 'active',
+                latest.valid_to = null,
+                latest.updated_at = datetime()
+            RETURN count(latest) AS c
+            """
+        ).single()
+        restored = int(result["c"]) if result else 0
+    return {"features_restored_as_current": restored}
+
+
 def repair_endpoint_id_collisions() -> dict:
     """
     One-time fix: archived APIEndpoint nodes still holding METHOD:path in endpoint_id
@@ -103,6 +179,8 @@ def repair_endpoint_id_collisions() -> dict:
     fixed = 0
     with driver.session() as session:
         _drop_legacy_endpoint_id_unique(session)
+        _drop_property_unique(session, "Feature", "name")
+        _drop_property_unique(session, "UserStory", "title")
         result = session.run(
             """
             MATCH (n:APIEndpoint)
@@ -113,9 +191,13 @@ def repair_endpoint_id_collisions() -> dict:
         ).single()
         fixed = int(result["c"]) if result else 0
     temporal = migrate_temporal_property_names()
+    feat = repair_feature_name_collisions()
+    orphan = repair_orphaned_current_features()
     return {
         "archived_endpoints_repaired": fixed,
         **temporal,
+        **feat,
+        **orphan,
     }
 
 

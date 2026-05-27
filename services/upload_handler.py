@@ -9,8 +9,11 @@ from services import linking_engine as mapper
 from services.content_hash import hash_bytes
 from services.duplicate_check import check_parsed_upload
 from services.entity_identity import resolve_upload_items
+from services.bundle_ingest import process_bundle
+from services.bundle_parser import ENTITY_BUNDLE
 from services.openapi_ingest import ingest_openapi
 from services.story_flows import prepare_story_flows, proposal_after_save
+from services.story_flow_delta import compute_story_flow_delta
 from services.upload_errors import DuplicateUploadError
 
 
@@ -20,7 +23,7 @@ def process_upload(
     *,
     raw_bytes: bytes | None = None,
     allow_duplicate: bool = False,
-    version_policy: str = "deprecate",
+    version_policy: str = "replace",
     filename: str | None = None,
     **_,
 ) -> dict:
@@ -28,11 +31,11 @@ def process_upload(
     items = parsed["items"]
 
     identity_meta: list[dict] = []
-    if entity_type != "api_spec":
+    if entity_type not in ("api_spec", ENTITY_BUNDLE):
         items, identity_meta = resolve_upload_items(entity_type, items)
         parsed["items"] = items
 
-    if not allow_duplicate:
+    if not allow_duplicate and entity_type != ENTITY_BUNDLE:
         dupes = check_parsed_upload(parsed, raw_bytes=raw_bytes)
         if dupes:
             raise DuplicateUploadError(dupes)
@@ -40,10 +43,25 @@ def process_upload(
     last_node_id = None
     sid = story_id
 
+    if entity_type == ENTITY_BUNDLE:
+        bundle = parsed["bundle"]
+        result = process_bundle(bundle, version_policy=version_policy)
+        sid = result.get("story_id") or story_id
+        graph = gs.get_story_subgraph(result["node_id"]) if result.get("node_id") else gs.get_full_graph()
+        return {
+            **result,
+            "graph": graph,
+            "identity": [],
+        }
+
     if entity_type == "api_spec":
         bundle_hash = hash_bytes(raw_bytes) if raw_bytes else None
         for item in items:
-            ingested = ingest_openapi(item["spec"], openapi_bundle_hash=bundle_hash)
+            ingested = ingest_openapi(
+                item["spec"],
+                openapi_bundle_hash=bundle_hash,
+                save_response_schemas=False,
+            )
             if ingested["endpoints"]:
                 last_node_id = ingested["endpoints"][-1]["node_id"]
         edges_total = mapper.resync_graph()
@@ -54,10 +72,11 @@ def process_upload(
             "edges_created": edges_total,
             "node_id": last_node_id,
             "graph": gs.get_full_graph(),
-            "message": "OpenAPI ingested",
+            "message": "OpenAPI ingested (endpoints only; response schemas not in graph)",
         }
 
     flow_meta: dict = {}
+    story_flow_delta: dict | None = None
     base_id = None
     last_version = None
     for item in items:
@@ -97,6 +116,12 @@ def process_upload(
         sync_warnings.append(f"Re-link skipped: {e}")
         edges_total = []
 
+    if entity_type == "user_story" and base_id and version_policy == "deprecate":
+        try:
+            story_flow_delta = compute_story_flow_delta(base_id)
+        except Exception as e:
+            logger.warning("story flow delta failed: %s", e)
+
     out = {
         "success": True,
         "entity_type": entity_type,
@@ -105,7 +130,11 @@ def process_upload(
         "base_id": base_id,
         "edges_created": edges_total,
         "message": f"Uploaded {len(items)} item(s)",
-        "graph": gs.get_full_graph(),
+        "graph": (
+            gs.get_story_subgraph(last_node_id)
+            if entity_type == "user_story" and last_node_id
+            else gs.get_full_graph()
+        ),
         "identity": identity_meta,
         "warnings": sync_warnings,
     }
@@ -118,6 +147,21 @@ def process_upload(
             out["proposal_id"] = flow_meta["proposal_id"]
             out["proposed_flows"] = flow_meta.get("proposed_flows")
             out["message"] = "Story saved; flow proposal pending approval"
+    if story_flow_delta:
+        out["story_flow_delta"] = story_flow_delta
+        if story_flow_delta.get("has_changes"):
+            add_n = ", ".join(f["name"] for f in story_flow_delta.get("added", []))
+            rem_n = ", ".join(f["name"] for f in story_flow_delta.get("removed", []))
+            mod_n = ", ".join(f["name"] for f in story_flow_delta.get("modified", []))
+            parts = []
+            if add_n:
+                parts.append(f"added: {add_n}")
+            if mod_n:
+                parts.append(f"modified: {mod_n}")
+            if rem_n:
+                parts.append(f"removed: {rem_n}")
+            if parts:
+                out["message"] = f"{out['message']} ({'; '.join(parts)})"
     try:
         from services import tracking
 
