@@ -46,6 +46,9 @@ let currentLayoutMode = "layered";
 let layoutRunning = false;
 let inventoryData = { nodes: [], total: 0, by_type: {} };
 let lastStoryFlowDelta = null;
+const graphCache = new Map();
+let graphRequestSeq = 0;
+let graphLoadingActiveSeq = 0;
 
 const UPLOAD_TYPE_LABELS = {
   user_story: "User Story",
@@ -459,6 +462,40 @@ async function fetchGraph() {
   return api(`/api/graph${q}`);
 }
 
+function graphCacheKey() {
+  return storyGraphParams() || "__all__";
+}
+
+function cloneGraph(graph) {
+  if (typeof structuredClone === "function") return structuredClone(graph);
+  return JSON.parse(JSON.stringify(graph));
+}
+
+function invalidateGraphCache() {
+  graphCache.clear();
+}
+
+function setGraphLoading(loading, message = "Loading graph…") {
+  const overlay = $("graphLoading");
+  const text = $("graphLoadingText");
+  const storySelect = $("storySelect");
+  if (overlay) {
+    overlay.classList.toggle("hidden", !loading);
+  }
+  if (text && message) {
+    text.textContent = message;
+  }
+  if (storySelect) storySelect.disabled = loading;
+}
+
+async function fetchGraphCached({ force = false } = {}) {
+  const key = graphCacheKey();
+  if (!force && graphCache.has(key)) return cloneGraph(graphCache.get(key));
+  const graph = await fetchGraph();
+  graphCache.set(key, graph);
+  return cloneGraph(graph);
+}
+
 function applyStoryVersionDelta(delta) {
   const banner = $("storyDeltaBanner");
   if (!cy) return;
@@ -513,7 +550,7 @@ const STORY_FOCUS_REL_TYPES = new Set([
   "HAS_FEATURE",
   "USES_API",
   "HAS_TEST_CASE",
-  "NEXT_STEP",
+  "DEPENDS_ON",
   "HAS_RESPONSE_SCHEMA",
   "VALIDATES_AGAINST",
   "PREVIOUS_VERSION",
@@ -521,7 +558,7 @@ const STORY_FOCUS_REL_TYPES = new Set([
 
 /**
  * Nodes/edges for one story: bounded BFS on product relationships only.
- * Does not walk DEPENDS_ON / BLOCKS / PREVIOUS_VERSION (those pull in other stories).
+ * Does not walk BLOCKS (cross-story coupling); PREVIOUS_VERSION is version metadata only.
  */
 function storyFocusCollection(storyNodes) {
   const storyNodeIds = new Set(storyNodes.map((n) => n.id()));
@@ -1037,6 +1074,9 @@ function applyGraph(graph, newNodeId = null) {
       if (n.type === "UserStory") classes.push("archived-story");
       else classes.push("archived-version");
     }
+    if (n.orphan_removed) {
+      classes.push("version-removed", "version-inactive", "orphan-removed");
+    }
     elements.push({
       group: "nodes",
       classes: classes.join(" ") || undefined,
@@ -1076,8 +1116,10 @@ function applyGraph(graph, newNodeId = null) {
   }
 
   const focusNodeId = graph.focus_story_node_id || $("storySelect").value;
-  if (graph.story_flow_delta?.has_changes && graph.scoped_to_story) {
+  if (graph.story_flow_delta?.has_changes) {
     lastStoryFlowDelta = graph.story_flow_delta;
+  } else if (graph.story_flow_delta) {
+    lastStoryFlowDelta = null;
   } else {
     lastStoryFlowDelta = null;
   }
@@ -1097,13 +1139,24 @@ function applyGraph(graph, newNodeId = null) {
   }
 }
 
-async function refreshGraph(newNodeId = null) {
-  const graph = await fetchGraph();
-  applyGraph(graph, newNodeId);
+async function refreshGraph(newNodeId = null, { force = false, loadingLabel = "Loading graph…" } = {}) {
+  const reqSeq = ++graphRequestSeq;
+  graphLoadingActiveSeq = reqSeq;
+  setGraphLoading(true, loadingLabel);
+  try {
+    const graph = await fetchGraphCached({ force });
+    if (reqSeq !== graphRequestSeq) return;
+    applyGraph(graph, newNodeId);
+  } finally {
+    if (reqSeq === graphLoadingActiveSeq) {
+      setGraphLoading(false);
+    }
+  }
 }
 
 /** Reload story list + fetch latest graph from Neo4j (use after any mutation). */
 async function reloadDashboard(highlightNodeId = null, storyNodeId = null) {
+  invalidateGraphCache();
   await loadStories();
   if (storyNodeId) {
     const sel = $("storySelect");
@@ -1114,7 +1167,7 @@ async function reloadDashboard(highlightNodeId = null, storyNodeId = null) {
   }
   await loadNodeInventory();
   await updatePersistenceStatus();
-  await refreshGraph(highlightNodeId);
+  await refreshGraph(highlightNodeId, { force: true, loadingLabel: "Reloading graph…" });
 }
 
 async function loadNodeInventory() {
@@ -1498,7 +1551,11 @@ $("storySelect").addEventListener("change", async () => {
   if (sid) sessionStorage.setItem("kg_story_focus", sid);
   else sessionStorage.removeItem("kg_story_focus");
   clearStoryFocus();
-  await refreshGraph();
+  try {
+    await refreshGraph(null, { loadingLabel: "Switching story…" });
+  } catch (e) {
+    showToast("Failed to switch story: " + e.message, "error");
+  }
 });
 $("btnRefresh").addEventListener("click", async () => {
   try {
@@ -1507,6 +1564,7 @@ $("btnRefresh").addEventListener("click", async () => {
   } catch (e) {
     showToast(e.message, "error");
   }
+  invalidateGraphCache();
   await reloadDashboard();
 });
 async function boot() {

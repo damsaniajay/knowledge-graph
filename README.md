@@ -35,7 +35,7 @@ This Knowledge Graph solves that by treating every entity -- a user story, a fea
 
 > *"If Mohsin is added first as manager, you have only one node -- no connections at all. Then when a new engineer is added, the edge is immediately created between them. Now imagine the reverse: the engineer was already in the system, then the manager joins -- at that point the same edge is created. The graph builds itself regardless of upload order."*
 
-This is exactly how the Knowledge Graph works. Upload a user story first -- it stands alone (with optional `flows[]`). Upload features later -- the graph links them via `HAS_FEATURE` and `NEXT_STEP`. Upload features first -- they stand alone until the story arrives. **The graph is always consistent, always current.**
+This is exactly how the Knowledge Graph works. Upload a user story first -- it stands alone (with optional `flows[]`). Upload features later -- the graph links them via `HAS_FEATURE` and `DEPENDS_ON`. Upload features first -- they stand alone until the story arrives. **The graph is always consistent, always current.**
 
 > **Sample data:** [`sample_data/README.md`](sample_data/README.md) · **edge coverage:** [`sample_data/DEMO_COVERAGE.md`](sample_data/DEMO_COVERAGE.md) · **where data is stored:** [`docs/STORAGE.md`](docs/STORAGE.md)
 
@@ -66,8 +66,8 @@ This is a **demonstration** of the above vision with real data from the Airtel P
 | Component | Description |
 |-----------|-------------|
 | **Node types** | UserStory, Feature, APIEndpoint, APIResponseSchema, TestCase |
-| **Edges** | HAS_FEATURE, USES_API, HAS_RESPONSE_SCHEMA, NEXT_STEP, DEPENDS_ON, HAS_TEST_CASE, VALIDATES_AGAINST |
-| **Flows** | `UserStory.flows[]` (ordered feature names) + `NEXT_STEP` between features — not separate nodes |
+| **Edges** | HAS_FEATURE, USES_API, HAS_RESPONSE_SCHEMA, DEPENDS_ON, HAS_TEST_CASE, VALIDATES_AGAINST |
+| **Flows** | `UserStory.flows[]` (ordered feature names); `DEPENDS_ON` encodes structural deps (dependent→prerequisite) — not separate nodes |
 | **Full Versioning** | Every node: `base_id` (stable) + `node_id` (versioned e.g. `f1_v2`) + `valid_at` / `invalid_at` |
 | **Relationship Mapper** | Runs after every upload -- scans above / below / siblings -- creates all matching edges automatically |
 | **Impact Analyser** | Runs after every v2+ upload -- detects what changed, surfaces all impacted downstream nodes |
@@ -125,7 +125,7 @@ This is a **demonstration** of the above vision with real data from the Airtel P
       │
       │ HAS_FEATURE
       ▼
-(:Feature) ──NEXT_STEP──► (:Feature)     -- sequence from story.flows[]
+(:Feature) ──DEPENDS_ON──► (:Feature)     -- dependent → prerequisite from story.flows[]
       │
       │ USES_API
       ▼
@@ -144,7 +144,7 @@ Feature    -[HAS_TEST_CASE]->    TestCase
 APIEndpoint -[HAS_TEST_CASE]->   TestCase
 ```
 
-**Flows** are a **list property** on `UserStory` (`flows[]`), not separate nodes. Feature order uses `NEXT_STEP` edges.
+**Flows** are a **list property** on `UserStory` (`flows[]`), not separate nodes. Flow order is on `flows[]`; dependency uses `DEPENDS_ON` (PlanFetch→Login, not Login→PlanFetch).
 
 Full reference: [`docs/SCHEMA.md`](docs/SCHEMA.md), [`docs/STORAGE.md`](docs/STORAGE.md), [`sample_data/DEMO_COVERAGE.md`](sample_data/DEMO_COVERAGE.md).
 
@@ -281,7 +281,7 @@ python main.py upload-feature sample_data/features/feature_payment.json
 **What happens:**  
 → 4 Feature nodes created -- each declares `apis_used` and optional `depends_on`  
 → No API nodes exist yet -- features stand alone  
-→ Story already has `flows[]` -- when features exist, mapper creates `HAS_FEATURE` + `NEXT_STEP`
+→ Story already has `flows[]` -- when features exist, mapper creates `HAS_FEATURE` + `DEPENDS_ON`
 
 ---
 
@@ -302,7 +302,7 @@ python main.py upload-api sample_data/api/spec_v1.yaml
 **What happens:**  
 → 6 APIEndpoint nodes created  
 → Linking engine links Features → APIs via `USES_API` and creates `APIResponseSchema` nodes from OpenAPI responses  
-→ Re-links story `flows[]` → `HAS_FEATURE` + `NEXT_STEP` (Login → PlanFetch → PlanSwitch → Payment)
+→ Re-links story `flows[]` → `HAS_FEATURE` + `DEPENDS_ON` chain from flows[] (e.g. PlanFetch→Login)
 
 ---
 
@@ -349,7 +349,7 @@ Expected output (features follow `flows[]` order; no Flow nodes):
   │      ├── 🔌 POST:/auth/login
   │      ├── 📋 TC-login-001 [positive]
   │      └── 📋 TC-login-002 [negative]
-  ├── 🧩 Feature: PlanFetch  v1  (NEXT_STEP from Login)
+  ├── 🧩 Feature: PlanFetch  v1  (DEPENDS_ON → Login)
   │      ├── 🔌 GET:/plans
   │      └── 📋 TC-planfetch-001 / TC-planfetch-002
   … PlanSwitch, Payment …
@@ -517,10 +517,10 @@ RETURN ep.node_id, ep.method, ep.path, ep.valid_at, ep.invalid_at, ep.is_current
 ORDER BY ep.path, ep.version
 ```
 
-### See feature sequence (NEXT_STEP chain)
+### See feature dependency chain (DEPENDS_ON)
 
 ```cypher
-MATCH p=(f:Feature {is_current:true})-[:NEXT_STEP*1..5]->(n:Feature {is_current:true})
+MATCH p=(f:Feature {is_current:true})-[:DEPENDS_ON*1..5]->(n:Feature {is_current:true})
 WHERE f.base_id = 'Login'
 RETURN p
 ```

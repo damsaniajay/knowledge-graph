@@ -14,7 +14,7 @@ Every **required edge** from the schema, which sample file produces it, and what
 | **HAS_TEST_CASE** | UserStory → TestCase | `linked_to: "Plan Change"` (resolves to US1) | `testcases/TC-US1-001.json` |
 | **HAS_TEST_CASE** | Feature → TestCase | `linked_to: "Login"` etc. | `testcases/TC-login-*.json`, … |
 | **HAS_TEST_CASE** | APIEndpoint → TestCase | `linked_to: "POST:/auth/login"` | `testcases/TC-API-login-401.json` |
-| **NEXT_STEP** | Feature → Feature | Order in LLM-derived `flows[]` | After story upload (auto) |
+| **DEPENDS_ON** | Feature → Feature | Structural dep from `flows[]` order (dependent→prerequisite) | After story upload (auto) |
 | **DEPENDS_ON** | Feature → Feature | `depends_on` on feature JSON | `feature_planfetch` → Login, etc. |
 | **HAS_RESPONSE_SCHEMA** | APIEndpoint → APIResponseSchema | OpenAPI `responses` | `api/spec_v1.yaml` |
 | **VALIDATES_AGAINST** | TestCase → APIResponseSchema | `type: negative` + link to feature/API with 4xx schema | `TC-login-002`, `TC-API-login-401`, … |
@@ -29,7 +29,7 @@ Every **required edge** from the schema, which sample file produces it, and what
 | API-level test | `TC-API-login-401.json` | `POST:/auth/login -[HAS_TEST_CASE]->` TC |
 | Feature pos + neg | `TC-login-001/002` | Coverage per feature |
 | Parameterized API | `feature_planfetch` + `/plans` | `USES_API` with `params=type=current` (linking engine) |
-| Multi-step journey | LLM `flows[]` on UserStory node | v1: 4× `HAS_FEATURE` + 3× `NEXT_STEP`; v2: 3× `HAS_FEATURE` |
+| Multi-step journey | LLM `flows[]` on UserStory node | v1: 4× `HAS_FEATURE` + 3× `DEPENDS_ON`; v2: 3× `HAS_FEATURE` + 2× `DEPENDS_ON` |
 | Payment standalone | `story_v2.json` after v1 + Payment feature | Payment has no `HAS_FEATURE` from US1 v2 |
 | Story mentions many APIs | `story_v1` content | Multiple `US1 -[USES_API]->` endpoints |
 | Versioning | `story_v2.json` (no id in file) | Same **US1** base_id, new version; LLM/title match |

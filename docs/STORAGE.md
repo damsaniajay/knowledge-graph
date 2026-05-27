@@ -44,7 +44,7 @@ Stored as Neo4j relationships with `type(r)` = edge name, e.g. `HAS_FEATURE`, `U
 | Feature → APIEndpoint | `(:Feature)-[:USES_API {params, coupling_type}]->(:APIEndpoint)` |
 | Feature → TestCase | `(:Feature)-[:HAS_TEST_CASE]->(:TestCase)` |
 | APIEndpoint → TestCase | `(:APIEndpoint)-[:HAS_TEST_CASE]->(:TestCase)` |
-| Feature → Feature (order) | `(:Feature)-[:NEXT_STEP]->(:Feature)` from `UserStory.flows[]` |
+| Feature → Feature (dependency) | `(:Feature)-[:DEPENDS_ON]->(:Feature)` dependent→prerequisite from `flows[]` |
 | APIEndpoint → APIResponseSchema | `(:APIEndpoint)-[:HAS_RESPONSE_SCHEMA]->(:APIResponseSchema)` |
 | TestCase → APIResponseSchema | `(:TestCase)-[:VALIDATES_AGAINST]->(:APIResponseSchema)` (negative tests) |
 

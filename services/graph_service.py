@@ -6,8 +6,7 @@ Graph (no Flow nodes):
   (:UserStory)-[:USES_API]->(:APIEndpoint)
   (:UserStory)-[:HAS_TEST_CASE]->(:TestCase)
   (:Feature)-[:USES_API {params, coupling_type}]->(:APIEndpoint)
-  (:Feature)-[:NEXT_STEP]->(:Feature)
-  (:Feature)-[:DEPENDS_ON]->(:Feature)
+  (:Feature)-[:DEPENDS_ON]->(:Feature)   # dependent → prerequisite (from flows[] order)
   (:Feature|:UserStory|:APIEndpoint)-[:HAS_TEST_CASE]->(:TestCase)
   (:APIEndpoint)-[:HAS_RESPONSE_SCHEMA]->(:APIResponseSchema)
   (:TestCase)-[:VALIDATES_AGAINST]->(:APIResponseSchema)
@@ -1431,7 +1430,6 @@ _STORY_SUBGRAPH_RELS = [
     "HAS_FEATURE",
     "USES_API",
     "HAS_TEST_CASE",
-    "NEXT_STEP",
     "DEPENDS_ON",
 ]
 
@@ -1447,8 +1445,13 @@ _CYPHER_GRAPH_EDGE_FILTER = f"""
 """
 
 
-def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
-    """BFS from one story version over product relationships only (no other UserStory nodes)."""
+def _collect_subgraph_node_ids(
+    session,
+    seed_ids: list[str],
+    *,
+    flow_feature_ids: set[str] | None = None,
+) -> set[str]:
+    """BFS from one story version; only features in flow_feature_ids are expanded when set."""
     ids = {i for i in seed_ids if i}
     allowed_stories = set(ids)
     frontier = set(ids)
@@ -1472,6 +1475,9 @@ def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
                 continue
             if row["label"] == "UserStory" and nid not in allowed_stories:
                 continue
+            if row["label"] == "Feature" and flow_feature_ids is not None:
+                if nid not in flow_feature_ids:
+                    continue
             ids.add(nid)
             next_frontier.add(nid)
         if not next_frontier:
@@ -1481,10 +1487,16 @@ def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
 
 
 def get_story_subgraph(story_node_id: str) -> dict:
-    """Only nodes and edges reachable from one UserStory version (for story-focused UI)."""
-    from services.linking_engine import materialize_story_version_links
+    """Only nodes and edges for one UserStory version's flows[] (removed features = standalone)."""
+    from services.linking_engine import (
+        _flow_depends_pairs,
+        _flow_feature_node_ids,
+    )
+    from services.story_flow_delta import compute_story_flow_delta
 
-    materialize_story_version_links(story_node_id)
+    story_version = get_user_story_version(story_node_id)
+    flows = list((story_version or {}).get("flows") or [])
+    flow_feature_ids = _flow_feature_node_ids(flows)
 
     nodes, edges = [], []
     seen_n, seen_e = set(), set()
@@ -1497,7 +1509,9 @@ def get_story_subgraph(story_node_id: str) -> dict:
         if not seed:
             return {"nodes": [], "edges": [], "story_id": None, "scoped_to_story": True}
 
-        node_ids = _collect_subgraph_node_ids(session, [story_node_id])
+        node_ids = _collect_subgraph_node_ids(
+            session, [story_node_id], flow_feature_ids=flow_feature_ids
+        )
 
         rows = session.run(
             f"""
@@ -1530,26 +1544,38 @@ def get_story_subgraph(story_node_id: str) -> dict:
                 "properties": _serialize_props(props),
             })
 
+        flow_depends = _flow_depends_pairs(flows)
+
         if seen_n:
             for row in session.run(
                 f"""
                 MATCH (a)-[r]->(b)
                 WHERE a.node_id IN $ids AND b.node_id IN $ids
                   AND type(r) IN $rels
-                RETURN a.node_id AS source, b.node_id AS target, type(r) AS rel_type
+                RETURN a.node_id AS source, b.node_id AS target, type(r) AS rel_type,
+                       labels(a)[0] AS sa, labels(b)[0] AS sb
                 """,
                 ids=list(seen_n),
                 rels=_STORY_SUBGRAPH_RELS,
             ):
-                key = f"{row['source']}|{row['rel_type']}|{row['target']}"
+                src, tgt, rel = row["source"], row["target"], row["rel_type"]
+                if rel == "DEPENDS_ON" and row["sa"] == "Feature" and row["sb"] == "Feature":
+                    if src not in flow_feature_ids or tgt not in flow_feature_ids:
+                        continue
+                    if (src, tgt) not in flow_depends:
+                        continue
+                if rel == "HAS_FEATURE" and row["sa"] == "UserStory":
+                    if tgt not in flow_feature_ids:
+                        continue
+                key = f"{src}|{rel}|{tgt}"
                 if key in seen_e:
                     continue
                 seen_e.add(key)
                 edges.append({
                     "id": key,
-                    "source": row["source"],
-                    "target": row["target"],
-                    "rel_type": row["rel_type"],
+                    "source": src,
+                    "target": tgt,
+                    "rel_type": rel,
                 })
 
         story_base = session.run(
@@ -1557,21 +1583,100 @@ def get_story_subgraph(story_node_id: str) -> dict:
             id=story_node_id,
         ).single()
 
+        story_base_id = story_base["b"] if story_base else None
+        delta = None
+        if story_base_id:
+            delta = compute_story_flow_delta(story_base_id, story_node_id=story_node_id)
+            for ref in delta.get("removed") or []:
+                nid = ref.get("node_id")
+                if not nid or nid in seen_n:
+                    continue
+                props = get_node_props(nid)
+                if not props:
+                    continue
+                seen_n.add(nid)
+                nodes.append({
+                    "id": nid,
+                    "base_id": props.get("base_id"),
+                    "type": "Feature",
+                    "entity_type": "feature",
+                    "label": _node_display_label(props),
+                    "version": props.get("version"),
+                    "is_current": bool(props.get("is_current", True)),
+                    "status": props.get("status"),
+                    "properties": _serialize_props(props),
+                    "orphan_removed": True,
+                })
+
     return {
         "nodes": nodes,
         "edges": edges,
-        "story_id": story_base["b"] if story_base else None,
+        "story_id": story_base_id,
         "focus_story_node_id": story_node_id,
         "scoped_to_story": True,
+        "story_flow_delta": delta,
     }
 
 
+def _prepare_full_graph_flow_context(session) -> tuple[dict, set[str], set[tuple[str, str]]]:
+    """
+    Build per-story-version flow membership and live-story DEPENDS_ON pairs.
+
+    Used by All nodes view: live v2 has no Payment links; v1 archived may still show Payment.
+    """
+    from services.linking_engine import _flow_depends_pairs, _flow_feature_node_ids
+
+    flows_by_story: dict[str, set[str]] = {}
+    live_feature_ids: set[str] = set()
+    live_flow_depends: set[tuple[str, str]] = set()
+
+    for row in session.run(
+        "MATCH (s:UserStory) "
+        "RETURN s.node_id AS id, s.flows AS flows, coalesce(s.is_current, false) AS is_current"
+    ):
+        story_nid = row["id"]
+        flows = list(row["flows"] or [])
+        fids = _flow_feature_node_ids(flows)
+        flows_by_story[story_nid] = fids
+        if row["is_current"]:
+            live_feature_ids |= fids
+            live_flow_depends |= _flow_depends_pairs(flows)
+
+    return flows_by_story, live_feature_ids, live_flow_depends
+
+
+def _full_graph_edge_allowed(
+    row: dict,
+    *,
+    flows_by_story: dict[str, set[str]],
+    live_feature_ids: set[str],
+    live_flow_depends: set[tuple[str, str]],
+) -> bool:
+    src, tgt, rel = row["source"], row["target"], row["rel_type"]
+    sa, sb = row.get("sa"), row.get("sb")
+
+    if rel == "HAS_FEATURE" and sa == "UserStory":
+        return tgt in flows_by_story.get(src, set())
+
+    if rel == "DEPENDS_ON" and sa == "Feature" and sb == "Feature":
+        return (src, tgt) in live_flow_depends
+
+    return True
+
+
 def get_full_graph(story_base_id: str | None = None) -> dict:
-    """Export graph: every version of every KG node (current + archived), no response-schema layer."""
+    """
+    Export all KG versions. Flow edges follow each story version's flows[];
+    Feature DEPENDS_ON (dependent→prerequisite) follows the live story flows[] only (e.g. v2 without Payment).
+    """
+    from services.story_flow_delta import compute_story_flow_delta
+
     nodes, edges = [], []
     seen_n, seen_e = set(), set()
 
     with _get_driver().session() as session:
+        flows_by_story, live_feature_ids, live_flow_depends = _prepare_full_graph_flow_context(session)
+
         rows = session.run(
             f"""
             MATCH (n)
@@ -1607,10 +1712,18 @@ def get_full_graph(story_base_id: str | None = None) -> dict:
                 MATCH (a)-[r]->(b)
                 WHERE a.node_id IN $ids AND b.node_id IN $ids
                   AND {_CYPHER_GRAPH_EDGE_FILTER}
-                RETURN a.node_id AS source, b.node_id AS target, type(r) AS rel_type
+                RETURN a.node_id AS source, b.node_id AS target, type(r) AS rel_type,
+                       labels(a)[0] AS sa, labels(b)[0] AS sb
                 """,
                 ids=list(seen_n),
             ):
+                if not _full_graph_edge_allowed(
+                    row,
+                    flows_by_story=flows_by_story,
+                    live_feature_ids=live_feature_ids,
+                    live_flow_depends=live_flow_depends,
+                ):
+                    continue
                 key = f"{row['source']}|{row['rel_type']}|{row['target']}"
                 if key in seen_e:
                     continue
@@ -1622,7 +1735,35 @@ def get_full_graph(story_base_id: str | None = None) -> dict:
                     "rel_type": row["rel_type"],
                 })
 
-    return {"nodes": nodes, "edges": edges, "story_id": story_base_id, "scoped_to_story": False}
+    ref_base = story_base_id
+    if not ref_base:
+        live_stories = get_all_user_stories()
+        if len(live_stories) == 1:
+            ref_base = live_stories[0]["base_id"]
+
+    live_story = get_user_story(ref_base) if ref_base else None
+    story_flow_delta = None
+    if live_story and ref_base:
+        story_flow_delta = compute_story_flow_delta(
+            ref_base, story_node_id=live_story["node_id"]
+        )
+        for ref in story_flow_delta.get("removed") or []:
+            nid = ref.get("node_id")
+            if not nid:
+                continue
+            for n in nodes:
+                if n["id"] == nid:
+                    n["orphan_removed"] = True
+                    break
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "story_id": ref_base or story_base_id,
+        "focus_story_node_id": live_story["node_id"] if live_story else None,
+        "scoped_to_story": False,
+        "story_flow_delta": story_flow_delta,
+    }
 
 
 def check_connection() -> dict:

@@ -36,14 +36,14 @@ def get_graph(
 
     if story_node_id:
         graph = gs.get_story_subgraph(story_node_id)
+        if story_id and "story_flow_delta" not in graph:
+            graph["story_flow_delta"] = compute_story_flow_delta(
+                story_id, story_node_id=story_node_id
+            )
     else:
         graph = gs.get_full_graph(story_base_id=story_id)
-    graph["focus_story_id"] = story_id
-    graph["focus_story_node_id"] = story_node_id
-    if story_id:
-        graph["story_flow_delta"] = compute_story_flow_delta(
-            story_id, story_node_id=story_node_id
-        )
+    graph["focus_story_id"] = graph.get("story_id") or story_id
+    graph["focus_story_node_id"] = story_node_id or graph.get("focus_story_node_id")
     return graph
 
 

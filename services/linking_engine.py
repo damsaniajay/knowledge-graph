@@ -11,7 +11,7 @@ import config
 from services import graph_service as gs
 from services.flow_derivation import clear_feature_catalog_cache, derive_flows
 from services.graph_model import REL_BLOCKS, REL_DEPENDS_ON, REL_HAS_FEATURE
-from services.graph_model import REL_HAS_RESPONSE_SCHEMA, REL_HAS_TEST_CASE, REL_NEXT_STEP, REL_USES_API
+from services.graph_model import REL_HAS_RESPONSE_SCHEMA, REL_HAS_TEST_CASE, REL_USES_API
 from services.graph_model import REL_VALIDATES_AGAINST
 
 
@@ -61,6 +61,7 @@ def _resync_scoped(
     """Relink only entities touched by a recent upload (avoids re-processing every story)."""
     clear_feature_catalog_cache()
     edges: list = []
+    _delete_all_feature_next_step_edges()
     gs.prune_edges_on_archived_nodes()
 
     seen_stories: set[str] = set()
@@ -107,6 +108,7 @@ def _resync_scoped(
 def _resync_graph() -> list:
     clear_feature_catalog_cache()
     edges: list = []
+    _delete_all_feature_next_step_edges()
     gs.prune_edges_on_archived_nodes()
 
     for story in gs.get_all_user_stories():
@@ -135,6 +137,80 @@ def _link(edge_list: list, triple: tuple) -> None:
 def _feature_in_flows(feature: dict, flows: list) -> bool:
     name, fid = feature.get("name"), feature.get("base_id")
     return name in flows or fid in flows
+
+
+def _resolve_flow_features(flows: list) -> list[dict]:
+    resolved: list[dict] = []
+    seen: set[str] = set()
+    for step in flows:
+        feat = gs.get_feature(step) or gs.get_feature_by_name(step)
+        if not feat:
+            continue
+        nid = feat["node_id"]
+        if nid in seen:
+            continue
+        seen.add(nid)
+        resolved.append(feat)
+    return resolved
+
+
+def _flow_feature_node_ids(flows: list) -> set[str]:
+    return {f["node_id"] for f in _resolve_flow_features(flows)}
+
+
+def _flow_depends_pairs(flows: list) -> set[tuple[str, str]]:
+    """
+    Structural dependencies from story flow order (dependent → prerequisite).
+
+    flows [Login, PlanFetch, PlanSwitch] → PlanFetch→Login, PlanSwitch→PlanFetch.
+    Order lives on UserStory.flows[]; edges encode dependency only, not workflow steps.
+    """
+    resolved = _resolve_flow_features(flows)
+    return {
+        (resolved[i]["node_id"], resolved[i - 1]["node_id"])
+        for i in range(1, len(resolved))
+    }
+
+
+def _delete_all_feature_next_step_edges() -> None:
+    """Remove legacy workflow NEXT_STEP edges between features (schema uses DEPENDS_ON only)."""
+    with gs._get_driver().session() as session:
+        session.run("MATCH (:Feature)-[r:NEXT_STEP]->(:Feature) DELETE r")
+
+
+def _rebuild_flow_depends_on_from_story_order(flows: list) -> None:
+    """
+    DEPENDS_ON from dependent feature → prerequisite feature, derived from flows[] order.
+
+    Not workflow/orchestration (no NEXT_STEP). Each step depends on the previous step in the list.
+    """
+    _delete_all_feature_next_step_edges()
+    allowed = _flow_feature_node_ids(flows)
+    expected = _flow_depends_pairs(flows)
+
+    with gs._get_driver().session() as session:
+        for row in session.run(
+            "MATCH (a:Feature)-[r:DEPENDS_ON]->(b:Feature) "
+            "RETURN a.node_id AS a, b.node_id AS b"
+        ):
+            a, b = row["a"], row["b"]
+            if a in allowed and b in allowed and (a, b) not in expected:
+                gs.delete_edge(a, REL_DEPENDS_ON, b)
+
+    for dependent, prerequisite in expected:
+        gs.create_edge(dependent, REL_DEPENDS_ON, prerequisite)
+
+
+def _prune_depends_on_for_flows(flows: list) -> None:
+    """Remove DEPENDS_ON into/out of features that are not in this story's flows[]."""
+    allowed = _flow_feature_node_ids(flows)
+    with gs._get_driver().session() as session:
+        for row in session.run(
+            "MATCH (a:Feature)-[r:DEPENDS_ON]->(b:Feature) "
+            "RETURN a.node_id AS a, b.node_id AS b"
+        ):
+            if row["a"] not in allowed or row["b"] not in allowed:
+                gs.delete_edge(row["a"], REL_DEPENDS_ON, row["b"])
 
 
 def _feature_display_name(feature: dict) -> str:
@@ -235,17 +311,22 @@ def materialize_story_version_links(story_node_id: str) -> list:
                     _link(edges, (story_node, REL_HAS_FEATURE, feat["node_id"]))
                 break
 
+    for linked in gs.get_features_for_story(story_node):
+        if linked["node_id"] not in linked_features:
+            gs.delete_edge(story_node, REL_HAS_FEATURE, linked["node_id"])
+
     for ep in gs.get_all_endpoints():
         if ep.get("path") and str(ep["path"]).lower() in content:
             if gs.create_edge(story_node, REL_USES_API, ep["node_id"]):
                 _link(edges, (story_node, REL_USES_API, ep["node_id"]))
 
-    _create_next_step_chain(flows, edges)
+    _rebuild_flow_depends_on_from_story_order(flows)
+    _prune_depends_on_for_flows(flows)
     return edges
 
 
 def _sync_story_flows_and_features(story_base_id: str) -> list:
-    """LLM/heuristic flows[] + HAS_FEATURE + NEXT_STEP for the live story version only."""
+    """LLM/heuristic flows[] + HAS_FEATURE + flow-order DEPENDS_ON for the live story version."""
     edges: list = []
 
     story = gs.get_user_story(story_base_id)
@@ -289,7 +370,8 @@ def _sync_story_flows_and_features(story_base_id: str) -> list:
         if linked["node_id"] not in desired_feature_ids:
             gs.delete_edge(story_node, REL_HAS_FEATURE, linked["node_id"])
 
-    _create_next_step_chain(flows, edges)
+    _rebuild_flow_depends_on_from_story_order(flows)
+    _prune_depends_on_for_flows(flows)
     return edges
 
 
@@ -331,18 +413,6 @@ def _link_story_relationships(story: dict) -> list:
                 _link(edges, (story_node, REL_HAS_TEST_CASE, tc["node_id"]))
 
     return edges
-
-
-def _create_next_step_chain(flows: list, edges: list) -> None:
-    resolved = []
-    for step in flows:
-        feat = gs.get_feature(step) or gs.get_feature_by_name(step)
-        if feat:
-            resolved.append(feat)
-    for i in range(len(resolved) - 1):
-        a, b = resolved[i], resolved[i + 1]
-        if gs.create_edge(a["node_id"], REL_NEXT_STEP, b["node_id"]):
-            _link(edges, (a["node_id"], REL_NEXT_STEP, b["node_id"]))
 
 
 def _link_feature_relationships(feature: dict) -> list:

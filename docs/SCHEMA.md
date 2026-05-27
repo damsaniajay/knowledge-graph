@@ -8,7 +8,7 @@ Storage details: **`docs/STORAGE.md`**
 **Flows are stored as a list on the UserStory node** (`flows: ["Login", "PlanFetch", …]`), not as separate nodes.
 
 - Order of the journey = `UserStory.flows[]`
-- Sequence in the graph = `NEXT_STEP` edges between **Feature** nodes (derived from that list)
+- Flow order lives on `UserStory.flows[]` only; structural deps = `DEPENDS_ON` (dependent → prerequisite)
 - **Never** in story upload JSON — filled by **LLM** (or heuristic if no API key) on story upload and stored on the Neo4j UserStory node
 
 ## Node types
@@ -30,7 +30,7 @@ UserStory  -[HAS_TEST_CASE]->    TestCase
 
 Feature    -[USES_API]->        APIEndpoint
 Feature    -[HAS_TEST_CASE]->   TestCase
-Feature    -[NEXT_STEP]->       Feature          (from flows[] order)
+Feature    -[DEPENDS_ON]->       Feature          (dependent → prerequisite from flows[] order)
 
 APIEndpoint -[HAS_TEST_CASE]->  TestCase
 APIEndpoint -[HAS_RESPONSE_SCHEMA]-> APIResponseSchema
