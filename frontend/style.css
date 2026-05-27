@@ -240,6 +240,12 @@ body {
 .node-row-actions button:hover { color: var(--accent); background: rgba(91, 141, 239, 0.12); }
 .node-row-actions .btn-del-node:hover { color: var(--danger); background: #3a1a1f; }
 .node-row-actions .btn-make-live:hover { color: var(--success, #4ade80); background: rgba(74, 222, 128, 0.1); }
+.node-row.deleting { opacity: 0.72; }
+.node-row-actions .btn-del-node.loading {
+  color: var(--accent);
+  background: rgba(91, 141, 239, 0.12);
+  cursor: wait;
+}
 .node-row.archived-row { opacity: 0.88; }
 .node-row .live-badge {
   font-size: 0.65rem;

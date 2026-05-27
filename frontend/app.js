@@ -49,6 +49,7 @@ let lastStoryFlowDelta = null;
 const graphCache = new Map();
 let graphRequestSeq = 0;
 let graphLoadingActiveSeq = 0;
+const deletingNodeIds = new Set();
 
 const UPLOAD_TYPE_LABELS = {
   user_story: "User Story",
@@ -486,6 +487,27 @@ function setGraphLoading(loading, message = "Loading graph…") {
     text.textContent = message;
   }
   if (storySelect) storySelect.disabled = loading;
+}
+
+function setDeleteLoading(nodeId, loading) {
+  const row = document.querySelector(`.node-row[data-node-id="${CSS.escape(nodeId)}"]`);
+  if (!row) return;
+  const delBtn = row.querySelector(".btn-del-node");
+  if (!delBtn) return;
+  if (loading) {
+    delBtn.dataset.prevLabel = delBtn.textContent || "×";
+    delBtn.textContent = "…";
+    delBtn.disabled = true;
+    delBtn.classList.add("loading");
+    delBtn.title = "Deleting version…";
+    row.classList.add("deleting");
+  } else {
+    delBtn.textContent = delBtn.dataset.prevLabel || "×";
+    delBtn.disabled = false;
+    delBtn.classList.remove("loading");
+    delBtn.title = "Delete this version only (other versions kept)";
+    row.classList.remove("deleting");
+  }
 }
 
 async function fetchGraphCached({ force = false } = {}) {
@@ -1285,10 +1307,14 @@ function focusInventoryNode(nodeId) {
 }
 
 async function deleteNodeVersion(nodeId, entityType, baseId, isLive) {
+  if (deletingNodeIds.has(nodeId)) return;
   const msg = isLive
     ? `Delete only this live version of "${baseId}"?\n\nOlder archived versions will stay in Neo4j — you can restore them with ↩. If this is the only version, it will be removed entirely.`
     : `Delete this archived version of "${baseId}"?\n\nOther versions (including the live one) will not be removed.`;
   if (!confirm(msg)) return;
+  deletingNodeIds.add(nodeId);
+  setDeleteLoading(nodeId, true);
+  setGraphLoading(true, "Deleting version…");
   try {
     const res = await api(`/api/graph/versions/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
     if (selectedNode?.id === nodeId) {
@@ -1300,6 +1326,10 @@ async function deleteNodeVersion(nodeId, entityType, baseId, isLive) {
     await reloadDashboard(focusId, entityType === "user_story" ? focusId : null);
   } catch (err) {
     showToast(err.message, "error");
+  } finally {
+    deletingNodeIds.delete(nodeId);
+    setDeleteLoading(nodeId, false);
+    setGraphLoading(false);
   }
 }
 

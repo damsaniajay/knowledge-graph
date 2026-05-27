@@ -109,6 +109,36 @@ openapi:
                       type: string
           '400':
             description: Invalid plan
+    /plans/eligibility-check:
+      post:
+        summary: Validate subscriber eligibility for selected plan
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - plan_id
+                properties:
+                  msisdn:
+                    type: string
+                  plan_id:
+                    type: string
+        responses:
+          '200':
+            description: Eligibility result
+            content:
+              application/json:
+                schema:
+                  type: object
+                  properties:
+                    eligible:
+                      type: boolean
+                    reason:
+                      type: string
+          '400':
+            description: Invalid request
     /payments/pay:
       post:
         summary: Process payment for plan switch order
@@ -140,6 +170,64 @@ openapi:
     /payments/activate:
       post:
         summary: Activate new plan after successful payment
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                properties:
+                  order_id:
+                    type: string
+        responses:
+          '200':
+            description: Plan activated
+          '404':
+            description: Order not found
+    /payments/initiate:
+      post:
+        summary: Start OTP-based payment for plan switch (modified flow)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                - payment_method
+                properties:
+                  order_id:
+                    type: string
+                  payment_method:
+                    type: string
+        responses:
+          '200':
+            description: Payment initiated; OTP sent
+    /payments/verify-otp:
+      post:
+        summary: Verify payment OTP (modified flow)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                - otp
+                properties:
+                  order_id:
+                    type: string
+                  otp:
+                    type: string
+        responses:
+          '200':
+            description: Payment verified
+          '400':
+            description: Invalid OTP
+    /plans/activate:
+      post:
+        summary: Activate selected plan after verified payment (modified flow)
         requestBody:
           content:
             application/json:
@@ -227,6 +315,30 @@ features:
   - /plans/switch
   depends_on:
   - PlanFetch
+- name: EligibilityCheck
+  description: Validates whether subscriber is eligible for the selected plan
+  apis_used:
+  - /plans/eligibility-check
+  depends_on:
+  - PlanFetch
+- name: PaymentInitiate
+  description: Starts OTP-based payment for plan switch (modified payment journey)
+  apis_used:
+  - /payments/initiate
+  depends_on:
+  - PlanSwitch
+- name: PaymentVerifyOtp
+  description: Verifies payment OTP before plan activation (modified payment journey)
+  apis_used:
+  - /payments/verify-otp
+  depends_on:
+  - PaymentInitiate
+- name: PlanActivate
+  description: Activates the selected plan after payment verification (modified payment journey)
+  apis_used:
+  - /plans/activate
+  depends_on:
+  - PaymentVerifyOtp
 - name: SupportTicket
   description: Raises customer support tickets; intentionally unrelated to plan change journey
   apis_used:
