@@ -2,6 +2,7 @@
 
 import logging
 
+import config
 from services import graph_service as gs
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,22 @@ from services.openapi_ingest import ingest_openapi
 from services.story_flows import prepare_story_flows, proposal_after_save
 from services.story_flow_delta import compute_story_flow_delta
 from services.upload_errors import DuplicateUploadError
+from services.upload_version import resolve_upload_version_policy
+
+
+def _graph_for_upload_response(
+    *,
+    entity_type: str,
+    node_id: str | None,
+    story_id: str | None,
+) -> dict | None:
+    if not config.UPLOAD_RETURN_GRAPH:
+        return None
+    if entity_type == "user_story" and node_id:
+        return gs.get_story_subgraph(node_id)
+    if story_id:
+        return gs.get_full_graph(story_base_id=story_id)
+    return gs.get_full_graph()
 
 
 def process_upload(
@@ -39,18 +56,29 @@ def process_upload(
         dupes = check_parsed_upload(parsed, raw_bytes=raw_bytes)
         if dupes:
             raise DuplicateUploadError(dupes)
+
+    if entity_type in ("api_spec", ENTITY_BUNDLE):
+        effective_version_policy = "replace"
+    else:
+        effective_version_policy = resolve_upload_version_policy(
+            parsed, identity_meta, raw_bytes=raw_bytes
+        )
+
     edges_total = []
     last_node_id = None
     sid = story_id
 
     if entity_type == ENTITY_BUNDLE:
         bundle = parsed["bundle"]
-        result = process_bundle(bundle, version_policy=version_policy)
+        result = process_bundle(bundle, version_policy=effective_version_policy)
         sid = result.get("story_id") or story_id
-        graph = gs.get_story_subgraph(result["node_id"]) if result.get("node_id") else gs.get_full_graph()
         return {
             **result,
-            "graph": graph,
+            "graph": _graph_for_upload_response(
+                entity_type="user_story",
+                node_id=result.get("node_id"),
+                story_id=sid,
+            ),
             "identity": [],
         }
 
@@ -64,14 +92,16 @@ def process_upload(
             )
             if ingested["endpoints"]:
                 last_node_id = ingested["endpoints"][-1]["node_id"]
-        edges_total = mapper.resync_graph()
+        edges_total = mapper.resync_graph(full=True)
         return {
             "success": True,
             "entity_type": entity_type,
             "count": len(items),
             "edges_created": edges_total,
             "node_id": last_node_id,
-            "graph": gs.get_full_graph(),
+            "graph": _graph_for_upload_response(
+                entity_type=entity_type, node_id=last_node_id, story_id=story_id
+            ),
             "message": "OpenAPI ingested (endpoints only; response schemas not in graph)",
         }
 
@@ -82,7 +112,7 @@ def process_upload(
     for item in items:
         if entity_type == "user_story":
             item, flow_meta = prepare_story_flows(item)
-            r = gs.save_user_story(item, version_policy=version_policy)
+            r = gs.save_user_story(item, version_policy=effective_version_policy)
             if flow_meta.get("needs_proposal"):
                 try:
                     flow_meta.update(proposal_after_save(item["story_id"]))
@@ -92,15 +122,15 @@ def process_upload(
             sid = item["story_id"]
             base_id = item["story_id"]
         elif entity_type == "feature":
-            r = gs.save_feature(item, version_policy=version_policy)
+            r = gs.save_feature(item, version_policy=effective_version_policy)
             base_id = item["feature_id"]
         elif entity_type == "api_endpoint":
-            r = gs.save_endpoint(item, version_policy=version_policy)
+            r = gs.save_endpoint(item, version_policy=effective_version_policy)
             base_id = r["base_id"]
         elif entity_type == "test_case":
             if item.get("flow_id") and not item.get("linked_to"):
                 item["linked_to"] = item["flow_id"]
-            r = gs.save_test_case(item, version_policy=version_policy)
+            r = gs.save_test_case(item, version_policy=effective_version_policy)
             base_id = item["tc_id"]
         else:
             raise ValueError(f"Unsupported: {entity_type}")
@@ -110,13 +140,25 @@ def process_upload(
 
     sync_warnings: list[str] = []
     try:
-        edges_total = mapper.resync_graph()
+        if entity_type == "user_story" and base_id:
+            edges_total = mapper.resync_graph(story_base_ids=[base_id])
+        elif entity_type == "feature" and base_id:
+            feat = gs.get_feature(base_id)
+            story_ids = mapper.find_story_base_ids_for_feature(feat) if feat else []
+            edges_total = mapper.resync_graph(
+                story_base_ids=story_ids,
+                feature_base_ids=[base_id],
+            )
+        elif entity_type == "test_case" and base_id:
+            edges_total = mapper.resync_graph(test_case_base_ids=[base_id])
+        else:
+            edges_total = mapper.resync_graph(full=True)
     except Exception as e:
         logger.exception("resync_graph failed after upload")
         sync_warnings.append(f"Re-link skipped: {e}")
         edges_total = []
 
-    if entity_type == "user_story" and base_id and version_policy == "deprecate":
+    if entity_type == "user_story" and base_id and effective_version_policy == "deprecate":
         try:
             story_flow_delta = compute_story_flow_delta(base_id)
         except Exception as e:
@@ -130,10 +172,10 @@ def process_upload(
         "base_id": base_id,
         "edges_created": edges_total,
         "message": f"Uploaded {len(items)} item(s)",
-        "graph": (
-            gs.get_story_subgraph(last_node_id)
-            if entity_type == "user_story" and last_node_id
-            else gs.get_full_graph()
+        "graph": _graph_for_upload_response(
+            entity_type=entity_type,
+            node_id=last_node_id,
+            story_id=sid or base_id,
         ),
         "identity": identity_meta,
         "warnings": sync_warnings,
@@ -171,7 +213,7 @@ def process_upload(
             node_id=last_node_id,
             version=last_version,
             filename=filename,
-            version_policy=version_policy,
+            version_policy=effective_version_policy,
             identity_meta=identity_meta,
             extra={"flow_meta": flow_meta} if flow_meta else None,
         )

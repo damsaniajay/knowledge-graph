@@ -28,7 +28,7 @@ def process_bundle(
     stories = bundle["stories"]
     test_cases = bundle.get("test_cases") or []
 
-    ingested = ingest_openapi(spec, save_response_schemas=False)
+    ingested = ingest_openapi(spec, save_response_schemas=False, resync=False)
     feature_ids: list[str] = []
     for feat in features:
         item, _meta = resolve_upload_items("feature", [dict(feat)])
@@ -58,7 +58,11 @@ def process_bundle(
         gs.save_test_case(item[0], version_policy=version_policy)
         tc_count += 1
 
-    edges = mapper.resync_graph()
+    story_ids = [r["story_id"] for r in story_results if r.get("story_id")]
+    edges = mapper.resync_graph(
+        story_base_ids=story_ids,
+        feature_base_ids=feature_ids,
+    )
 
     primary = story_results[0] if story_results else {}
     return {

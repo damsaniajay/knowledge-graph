@@ -188,7 +188,7 @@ def cmd_upload_api(file_path: str) -> None:
     print(f"  File      : {file_path}")
     print(_hr())
 
-    ingested = ingest_openapi(spec)
+    ingested = ingest_openapi(spec, resync=True)
     print(f"\n  Endpoints        : {len(ingested['endpoints'])}")
     print(f"  Response schemas : {len(ingested['response_schemas'])}")
     print(f"  Edges created    : {len(ingested['edges_created'])}")

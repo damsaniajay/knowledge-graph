@@ -67,7 +67,7 @@ def ingest_openapi(
     *,
     openapi_bundle_hash: str | None = None,
     save_response_schemas: bool = False,
-    resync: bool = True,
+    resync: bool = False,
 ) -> dict:
     endpoints, schemas = parse_openapi(spec)
     results = {

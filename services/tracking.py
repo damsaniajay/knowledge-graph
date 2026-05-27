@@ -71,7 +71,7 @@ def on_version_saved(
             if conn is None:
                 return
             with conn.cursor() as cur:
-                if not is_new and version_policy != "delete":
+                if not is_new:
                     cur.execute(
                         """
                         UPDATE entity_history

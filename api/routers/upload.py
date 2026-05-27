@@ -20,9 +20,6 @@ VALID_TYPES = {
     "api_endpoint",
     "bundle",
 }
-VALID_VERSION_POLICIES = {"deprecate", "delete", "replace"}
-
-
 def _duplicate_detail(duplicates: list[dict]) -> dict:
     return {"code": "duplicate", "duplicates": duplicates}
 
@@ -60,7 +57,6 @@ async def preview_upload(
         if parsed["entity_type"] == "bundle"
         else assess_upload_versioning(parsed, identity, raw_bytes=content)
     )
-    needs_version_decision = assessment["needs_version_decision"]
     return {
         "filename": file.filename,
         "entity_type": parsed["entity_type"],
@@ -70,7 +66,8 @@ async def preview_upload(
         "has_duplicates": bool(duplicates),
         "duplicates": duplicates,
         "identity": identity,
-        "needs_version_decision": needs_version_decision,
+        "needs_version_decision": False,
+        "will_create_version": assessment.get("will_create_version", False),
         "change_preview": assessment.get("change_preview"),
         "version_target": assessment.get("version_target"),
     }
@@ -82,15 +79,9 @@ async def upload_file(
     entity_type: str = Query("auto"),
     story_id: str | None = Query(None),
     force: bool = Query(False, description="Upload anyway even if identical content exists"),
-    version_mode: str = Query(
-        "replace",
-        description="replace=update current in place; deprecate=archive old as new version; delete=remove old permanently",
-    ),
 ):
     if entity_type not in VALID_TYPES:
         raise HTTPException(400, f"entity_type must be one of: {', '.join(sorted(VALID_TYPES))}")
-    if version_mode not in VALID_VERSION_POLICIES:
-        raise HTTPException(400, f"version_mode must be one of: {', '.join(sorted(VALID_VERSION_POLICIES))}")
     content = await file.read()
     if not content:
         raise HTTPException(400, "Empty file")
@@ -101,7 +92,6 @@ async def upload_file(
             story_id=story_id,
             raw_bytes=content,
             allow_duplicate=force,
-            version_policy=version_mode,
             filename=file.filename,
         )
     except DuplicateUploadError as e:

@@ -40,6 +40,16 @@ USE_LLM_FLOWS = (
     else bool(OPENAI_API_KEY)
 )
 
+# Fast upload: heuristic flows + no LLM entity match; scoped relink (not full graph re-derive)
+UPLOAD_FAST = os.getenv("UPLOAD_FAST", "true").strip().lower() in ("1", "true", "yes")
+
+# Skip embedding full graph in upload API response (UI refetches via GET /api/graph)
+UPLOAD_RETURN_GRAPH = os.getenv("UPLOAD_RETURN_GRAPH", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
 # If true, story upload without flows[] creates a proposal instead of writing flows immediately
 FLOW_REQUIRE_APPROVAL = os.getenv("FLOW_REQUIRE_APPROVAL", "false").strip().lower() in (
     "1",

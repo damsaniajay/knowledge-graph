@@ -51,7 +51,18 @@ _EXTRACT_SYSTEM = (
 )
 
 
+_catalog_cache: list[str] | None = None
+
+
+def clear_feature_catalog_cache() -> None:
+    global _catalog_cache
+    _catalog_cache = None
+
+
 def _feature_catalog() -> list[str]:
+    global _catalog_cache
+    if _catalog_cache is not None:
+        return _catalog_cache
     try:
         features = gs.get_all_features()
     except Exception as e:
@@ -63,8 +74,10 @@ def _feature_catalog() -> list[str]:
             n = (f.get("name") or f.get("base_id") or "").strip()
             if n and n not in names:
                 names.append(n)
+        _catalog_cache = names
         return names
-    return list(_DEMO_FLOW_SEQUENCE)
+    _catalog_cache = list(_DEMO_FLOW_SEQUENCE)
+    return _catalog_cache
 
 
 def _normalize_to_catalog(flows: list, catalog: list[str]) -> list[str]:

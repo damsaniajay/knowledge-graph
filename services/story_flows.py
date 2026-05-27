@@ -23,10 +23,11 @@ def prepare_story_flows(story: dict) -> tuple[dict, dict]:
         meta["flow_derivation"] = {"source": "file"}
         return story, meta
 
-    story["flows"] = derive_flows(story)
+    use_llm = config.USE_LLM_FLOWS and config.OPENAI_API_KEY and not config.UPLOAD_FAST
+    story["flows"] = derive_flows(story, use_llm=use_llm)
     meta["flow_derivation"] = story.pop(
         "_flow_derivation",
-        {"source": "llm" if config.USE_LLM_FLOWS and config.OPENAI_API_KEY else "heuristic"},
+        {"source": "llm" if use_llm else "heuristic"},
     )
     return story, meta
 

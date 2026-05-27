@@ -134,6 +134,17 @@
     </div>
   </main>
 
+  <div id="uploadConfirmModal" class="modal hidden" role="dialog" aria-labelledby="uploadConfirmTitle">
+    <div class="modal-card">
+      <h2 id="uploadConfirmTitle">Save as new version?</h2>
+      <p id="uploadConfirmText" class="hint">This upload updates an existing item. A new version will be saved and the previous version stays in history.</p>
+      <div class="modal-actions">
+        <button type="button" id="btnUploadConfirmCancel" class="btn ghost">Cancel</button>
+        <button type="button" id="btnUploadConfirmContinue" class="btn primary">Continue</button>
+      </div>
+    </div>
+  </div>
+
   <div id="duplicateModal" class="modal hidden" role="alertdialog" aria-labelledby="duplicateModalTitle">
     <div class="modal-card">
       <h2 id="duplicateModalTitle">Already uploaded</h2>
@@ -146,22 +157,10 @@
   </div>
 
 
-  <div id="versionModeModal" class="modal hidden" role="dialog" aria-labelledby="versionModeTitle">
-    <div class="modal-card">
-      <h2 id="versionModeTitle">Changes detected — keep history?</h2>
-      <p id="versionModeText" class="hint">This upload adds, modifies, or removes content vs the current version. Choose whether to version it or replace in place.</p>
-      <div class="modal-actions">
-        <button type="button" id="btnVersionModeCancel" class="btn ghost">Cancel</button>
-        <button type="button" id="btnVersionModeDelete" class="btn danger-outline">Delete old permanently</button>
-        <button type="button" id="btnVersionModeDeprecate" class="btn primary">Deprecate old version</button>
-      </div>
-    </div>
-  </div>
-
   <div id="editModal" class="modal hidden">
     <div class="modal-card">
       <h2>Edit node</h2>
-      <p class="hint">Updates the current node in Neo4j (use file upload + Deprecate for a new version with history).</p>
+      <p class="hint">Updates the current version in place. Re-upload a file with changes to create a new version automatically.</p>
       <form id="editForm" class="form"></form>
       <div class="modal-actions">
         <button type="button" id="btnCancelEdit" class="btn ghost">Cancel</button>

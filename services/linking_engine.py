@@ -7,8 +7,9 @@ regardless of upload order (feature before/after story, API, test case, etc.).
 
 import re
 
+import config
 from services import graph_service as gs
-from services.flow_derivation import derive_flows
+from services.flow_derivation import clear_feature_catalog_cache, derive_flows
 from services.graph_model import REL_BLOCKS, REL_DEPENDS_ON, REL_HAS_FEATURE
 from services.graph_model import REL_HAS_RESPONSE_SCHEMA, REL_HAS_TEST_CASE, REL_NEXT_STEP, REL_USES_API
 from services.graph_model import REL_VALIDATES_AGAINST
@@ -27,12 +28,84 @@ def map_on_upload(entity_type: str, entity_id: str) -> dict:
     return {"edges_created": resync_graph()}
 
 
-def resync_graph() -> list:
-    """Public re-sync (CLI refresh, POST /api/graph/relink)."""
+def resync_graph(
+    *,
+    story_base_ids: list[str] | None = None,
+    feature_base_ids: list[str] | None = None,
+    test_case_base_ids: list[str] | None = None,
+    full: bool = False,
+) -> list:
+    """
+    Rebuild edges after upload.
+
+    Default (UPLOAD_FAST): only touch affected stories/features when IDs are passed.
+    full=True or no scope: legacy full-graph relink (POST /api/graph/relink).
+    """
+    if full or not config.UPLOAD_FAST:
+        return _resync_graph()
+    if story_base_ids or feature_base_ids or test_case_base_ids:
+        return _resync_scoped(
+            story_base_ids=story_base_ids or [],
+            feature_base_ids=feature_base_ids or [],
+            test_case_base_ids=test_case_base_ids or [],
+        )
     return _resync_graph()
 
 
+def _resync_scoped(
+    *,
+    story_base_ids: list[str],
+    feature_base_ids: list[str],
+    test_case_base_ids: list[str],
+) -> list:
+    """Relink only entities touched by a recent upload (avoids re-processing every story)."""
+    clear_feature_catalog_cache()
+    edges: list = []
+    gs.prune_edges_on_archived_nodes()
+
+    seen_stories: set[str] = set()
+    for sid in story_base_ids:
+        if sid and sid not in seen_stories:
+            seen_stories.add(sid)
+            edges.extend(_sync_story_flows_and_features(sid))
+            current = gs.get_user_story(sid)
+            if current:
+                edges.extend(_link_story_relationships(current))
+
+    seen_features: set[str] = set()
+    for fid in feature_base_ids:
+        if fid and fid not in seen_features:
+            seen_features.add(fid)
+            feat = gs.get_feature(fid)
+            if not feat:
+                continue
+            edges.extend(_link_feature_relationships(feat))
+            for bid in find_story_base_ids_for_feature(feat):
+                if bid not in seen_stories:
+                    seen_stories.add(bid)
+                    edges.extend(_sync_story_flows_and_features(bid))
+                    current = gs.get_user_story(bid)
+                    if current:
+                        edges.extend(_link_story_relationships(current))
+            edges.extend(_materialize_archived_stories_for_feature(feat))
+
+    for ep in gs.get_all_endpoints():
+        edges.extend(_link_endpoint_relationships(ep))
+
+    if test_case_base_ids:
+        for tc_id in test_case_base_ids:
+            tc = gs.get_test_case(tc_id)
+            if tc:
+                edges.extend(_link_test_case_relationships(tc))
+    else:
+        for tc in gs.get_all_test_cases():
+            edges.extend(_link_test_case_relationships(tc))
+
+    return edges
+
+
 def _resync_graph() -> list:
+    clear_feature_catalog_cache()
     edges: list = []
     gs.prune_edges_on_archived_nodes()
 
@@ -87,9 +160,94 @@ def _insert_feature_by_depends(feature: dict, flows: list) -> list:
     return flows
 
 
-def _sync_story_flows_and_features(story_base_id: str) -> list:
-    """LLM/heuristic flows[] + HAS_FEATURE + NEXT_STEP for all stories."""
+def find_story_base_ids_for_feature(feature: dict) -> list[str]:
+    """Story base_ids that reference this feature (any version's flows[] or live content APIs)."""
+    name = (feature.get("name") or feature.get("base_id") or "").strip()
+    fid = feature.get("base_id") or ""
+    apis = [p.lower() for p in (feature.get("apis_used") or []) if p]
+    found: set[str] = set()
+
+    with gs._get_driver().session() as session:
+        for row in session.run(
+            "MATCH (s:UserStory) "
+            "RETURN s.base_id AS base_id, s.flows AS flows, s.content AS content, "
+            "coalesce(s.is_current, false) AS is_current"
+        ):
+            base_id = row["base_id"]
+            flows = list(row["flows"] or [])
+            if name and (name in flows or fid in flows):
+                found.add(base_id)
+                continue
+            if apis:
+                content = (row["content"] or "").lower()
+                if any(p in content for p in apis):
+                    found.add(base_id)
+    return list(found)
+
+
+def _materialize_archived_stories_for_feature(feature: dict) -> list:
+    """Rebuild edges on archived story versions that list this feature in flows[]."""
+    name = (feature.get("name") or feature.get("base_id") or "").strip()
+    fid = feature.get("base_id") or ""
     edges: list = []
+    with gs._get_driver().session() as session:
+        for row in session.run(
+            """
+            MATCH (s:UserStory)
+            WHERE coalesce(s.is_current, false) = false
+            RETURN s.node_id AS node_id, s.flows AS flows
+            """
+        ):
+            flows = list(row["flows"] or [])
+            if name and (name in flows or fid in flows):
+                edges.extend(materialize_story_version_links(row["node_id"]))
+    return edges
+
+
+def materialize_story_version_links(story_node_id: str) -> list:
+    """
+    Ensure a specific story version (live or archived) has edges from its flows[] and content.
+    Does not remove edges from other story versions.
+    """
+    story = gs.get_user_story_version(story_node_id)
+    if not story:
+        return []
+
+    edges: list = []
+    story_node = story_node_id
+    flows = list(story.get("flows") or [])
+    content = (story.get("content") or "").lower()
+    linked_features: set[str] = set()
+
+    for feat in gs.get_all_features():
+        if _feature_in_flows(feat, flows):
+            linked_features.add(feat["node_id"])
+            if gs.create_edge(story_node, REL_HAS_FEATURE, feat["node_id"]):
+                _link(edges, (story_node, REL_HAS_FEATURE, feat["node_id"]))
+
+    for feat in gs.get_all_features():
+        if feat["node_id"] in linked_features:
+            continue
+        for path in feat.get("apis_used") or []:
+            if path and path.lower() in content:
+                linked_features.add(feat["node_id"])
+                if gs.create_edge(story_node, REL_HAS_FEATURE, feat["node_id"]):
+                    _link(edges, (story_node, REL_HAS_FEATURE, feat["node_id"]))
+                break
+
+    for ep in gs.get_all_endpoints():
+        if ep.get("path") and str(ep["path"]).lower() in content:
+            if gs.create_edge(story_node, REL_USES_API, ep["node_id"]):
+                _link(edges, (story_node, REL_USES_API, ep["node_id"]))
+
+    _create_next_step_chain(flows, edges)
+    return edges
+
+
+def _sync_story_flows_and_features(story_base_id: str) -> list:
+    """LLM/heuristic flows[] + HAS_FEATURE + NEXT_STEP for the live story version only."""
+    edges: list = []
+
     story = gs.get_user_story(story_base_id)
     if not story:
         return edges
@@ -104,14 +262,14 @@ def _sync_story_flows_and_features(story_base_id: str) -> list:
         "blocked_by": story.get("blocked_by") or [],
     }
 
-    try:
-        flows = derive_flows(
-            payload,
-            current_flows=old_flows if old_flows else None,
-            force=True,
-        )
-    except Exception:
+    if old_flows:
         flows = list(old_flows)
+    else:
+        use_llm = config.USE_LLM_FLOWS and config.OPENAI_API_KEY and not config.UPLOAD_FAST
+        try:
+            flows = derive_flows(payload, use_llm=use_llm)
+        except Exception:
+            flows = list(old_flows)
 
     if flows != old_flows:
         payload["flows"] = flows

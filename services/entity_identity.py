@@ -170,7 +170,7 @@ def resolve_user_story(item: dict) -> tuple[dict, dict]:
 
     candidates = _story_candidates()
     match = None
-    if config.use_llm_entity_match() and candidates:
+    if config.use_llm_entity_match() and not config.UPLOAD_FAST and candidates:
         try:
             match = _llm_match_story(item, candidates, hint_id)
         except LLMError as e:
@@ -444,7 +444,7 @@ def resolve_test_case(item: dict) -> tuple[dict, dict]:
 
     # If linked_to still doesn't resolve to any existing entity, use LLM to map
     # it to the closest existing Feature/UserStory/APIEndpoint.
-    if linked and not matched and config.use_llm_entity_match():
+    if linked and not matched and config.use_llm_entity_match() and not config.UPLOAD_FAST:
         try:
             resolved = gs.resolve_entity(str(item.get("linked_to") or "").strip())
         except Exception:

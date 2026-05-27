@@ -41,7 +41,7 @@ let lastGraph = { nodes: [], edges: [], scoped_to_story: false };
 const savedPositions = new Map();
 let highlightNodeId = null;
 let pendingFile = null;
-let pendingVersionMode = null;
+let uploadVersionConfirmed = false;
 let currentLayoutMode = "layered";
 let layoutRunning = false;
 let inventoryData = { nodes: [], total: 0, by_type: {} };
@@ -144,6 +144,29 @@ function hideDuplicateModal() {
   $("duplicateModal")?.classList.add("hidden");
 }
 
+function hideUploadConfirmModal() {
+  $("uploadConfirmModal")?.classList.add("hidden");
+}
+
+function showUploadConfirmModal(preview) {
+  const modal = $("uploadConfirmModal");
+  const text = $("uploadConfirmText");
+  if (!modal) return;
+  const id = preview.version_target?.base_id || preview.preview?.assigned_id || "this item";
+  const delta = formatChangePreview(preview.change_preview);
+  if (text) {
+    text.textContent =
+      `Upload will create a new version of ${id}. The previous version remains in the graph for history.` +
+      (delta ? ` Changes: ${delta}.` : "");
+  }
+  modal.classList.remove("hidden");
+}
+
+function resetUploadConfirmState() {
+  uploadVersionConfirmed = false;
+  hideUploadConfirmModal();
+}
+
 function uploadQueryParams() {
   const params = new URLSearchParams();
   const baseId = selectedStoryBaseId();
@@ -154,7 +177,6 @@ function uploadQueryParams() {
     params.set("parent_type", selectedNode.type);
     params.set("parent_base_id", selectedNode.base_id);
   }
-  if (pendingVersionMode) params.set("version_mode", pendingVersionMode);
   const q = params.toString();
   return q ? `?${q}` : "";
 }
@@ -185,29 +207,6 @@ function formatChangePreview(cp) {
   if (rem) parts.push(`Removed: ${rem}`);
   if (!parts.length && cp.change_type === "content") parts.push("Content changed");
   return parts.join(" · ");
-}
-
-function askVersionMode(preview) {
-  return new Promise((resolve) => {
-    const modal = $("versionModeModal");
-    const text = $("versionModeText");
-    const id = preview?.version_target?.base_id || preview?.preview?.assigned_id || "this entity";
-    const delta = formatChangePreview(preview?.change_preview);
-    if (text) {
-      text.textContent =
-        `Changes detected for ${id}${delta ? ` (${delta})` : ""}. ` +
-        "Deprecate saves a new version and keeps the previous node in the graph (archived). " +
-        "Delete permanently removes all older versions and replaces them with this upload as v1.";
-    }
-    const finish = (mode) => {
-      modal?.classList.add("hidden");
-      resolve(mode);
-    };
-    $("btnVersionModeDeprecate").onclick = () => finish("deprecate");
-    $("btnVersionModeDelete").onclick = () => finish("delete");
-    $("btnVersionModeCancel").onclick = () => finish(null);
-    modal?.classList.remove("hidden");
-  });
 }
 
 function renderUploadPreview(data) {
@@ -260,7 +259,7 @@ function clearPendingFile() {
   $("btnUpload").disabled = true;
   $("fileInput").value = "";
   hideDuplicateModal();
-  pendingVersionMode = null;
+  resetUploadConfirmState();
 }
 
 async function handleFileSelected(file) {
@@ -286,23 +285,21 @@ async function handleFileSelected(file) {
       $("btnUpload").disabled = true;
       return;
     }
-    if (preview.needs_version_decision) {
-      const mode = await askVersionMode(preview);
-      if (!mode) {
-        $("btnUpload").disabled = true;
-        return;
-      }
-      pendingVersionMode = mode;
-      const note =
-        mode === "delete"
-          ? "Delete old permanently (new v1)"
-          : "Deprecate — save as new version, keep history";
-      $("uploadPreview").innerHTML += `<div class="hint" style="margin-top:.5rem">Version policy: ${escapeHtml(note)}</div>`;
-    } else {
-      pendingVersionMode = null;
-    }
     hideDuplicateModal();
-    $("btnUpload").disabled = false;
+    if (preview.will_create_version) {
+      const delta = formatChangePreview(preview.change_preview);
+      const id = preview.version_target?.base_id || preview.preview?.assigned_id || "entity";
+      $("uploadPreview").innerHTML +=
+        `<div class="hint" style="margin-top:.5rem">` +
+        `New version for <strong>${escapeHtml(id)}</strong> — previous version stays in history` +
+        `${delta ? ` (${escapeHtml(delta)})` : ""}. Click <strong>Continue</strong> to proceed.</div>`;
+      uploadVersionConfirmed = false;
+      showUploadConfirmModal(preview);
+      $("btnUpload").disabled = true;
+    } else {
+      resetUploadConfirmState();
+      $("btnUpload").disabled = false;
+    }
   } catch (err) {
     $("uploadPreview").innerHTML = `<span class="hint" style="color:var(--danger)">${escapeHtml(err.message)}</span>`;
     $("btnUpload").disabled = true;
@@ -311,6 +308,10 @@ async function handleFileSelected(file) {
 
 async function uploadPendingFile() {
   if (!pendingFile) return;
+  const confirmModal = $("uploadConfirmModal");
+  if (confirmModal && !confirmModal.classList.contains("hidden") && !uploadVersionConfirmed) {
+    return;
+  }
   const fd = new FormData();
   fd.append("file", pendingFile);
   $("btnUpload").disabled = true;
@@ -375,6 +376,22 @@ function initUpload() {
   $("btnDuplicateClose")?.addEventListener("click", hideDuplicateModal);
   $("duplicateModal")?.addEventListener("click", (e) => {
     if (e.target.id === "duplicateModal") hideDuplicateModal();
+  });
+
+  $("btnUploadConfirmCancel")?.addEventListener("click", () => {
+    resetUploadConfirmState();
+    $("btnUpload").disabled = true;
+  });
+  $("btnUploadConfirmContinue")?.addEventListener("click", () => {
+    uploadVersionConfirmed = true;
+    hideUploadConfirmModal();
+    if (pendingFile) $("btnUpload").disabled = false;
+  });
+  $("uploadConfirmModal")?.addEventListener("click", (e) => {
+    if (e.target.id === "uploadConfirmModal") {
+      resetUploadConfirmState();
+      $("btnUpload").disabled = true;
+    }
   });
   $("uploadType").addEventListener("change", (e) => {
     const sel = e.target;
@@ -508,14 +525,6 @@ const STORY_FOCUS_REL_TYPES = new Set([
  */
 function storyFocusCollection(storyNodes) {
   const storyNodeIds = new Set(storyNodes.map((n) => n.id()));
-  storyNodes.forEach((s) => {
-    if (s.data("type") !== "UserStory") return;
-    s.connectedEdges()
-      .filter((e) => e.data("rel_type") === "PREVIOUS_VERSION")
-      .connectedNodes()
-      .filter((n) => n.data("type") === "UserStory")
-      .forEach((n) => storyNodeIds.add(n.id()));
-  });
 
   const allowNode = (n) => {
     if (n.data("type") !== "UserStory") return true;
@@ -1064,20 +1073,16 @@ function applyGraph(graph, newNodeId = null) {
     cy.nodes().forEach(snapNodeToLayer);
   } else {
     resizeGraphViewport();
-    const sid = $("storySelect").value;
-    if (sid) {
-      focusStoryView(sid);
-    } else if (cy.nodes().length) {
-      cy.fit(cy.elements(), 48);
-    }
   }
 
-  if (graph.story_flow_delta?.has_changes) {
+  const focusNodeId = graph.focus_story_node_id || $("storySelect").value;
+  if (graph.story_flow_delta?.has_changes && graph.scoped_to_story) {
     lastStoryFlowDelta = graph.story_flow_delta;
-  } else if (graph.story_flow_delta) {
+  } else {
     lastStoryFlowDelta = null;
   }
   applyStoryVersionDelta(lastStoryFlowDelta);
+  if (focusNodeId) focusStoryView(focusNodeId);
 
   if (newNodeId) {
     highlightNodeId = newNodeId;
@@ -1136,17 +1141,22 @@ function renderNodeInventory() {
 
   container.innerHTML = nodes
     .map((n) => {
-      const sel = selectedNode?.base_id === n.base_id && selectedNode?.type === n.type ? " selected" : "";
+      const sel = selectedNode?.id === n.id ? " selected" : "";
+      const live = n.is_current !== false;
+      const restoreBtn = live
+        ? `<span class="live-badge" title="This is the live version">live</span>`
+        : `<button type="button" class="btn-make-live" title="Make this version live (restore this flow)">↩</button>`;
       return `
-      <div class="node-row${sel}" data-base-id="${escapeHtml(n.base_id)}" data-entity-type="${escapeHtml(n.entity_type)}" data-node-id="${escapeHtml(n.id)}">
+      <div class="node-row${sel}${live ? "" : " archived-row"}" data-base-id="${escapeHtml(n.base_id)}" data-entity-type="${escapeHtml(n.entity_type)}" data-node-id="${escapeHtml(n.id)}" data-is-current="${live}">
         <div class="node-row-main">
           <div class="node-row-type">${escapeHtml(n.type)}</div>
           <div class="node-row-label">${escapeHtml(n.label)}</div>
-          <div class="node-row-meta">${escapeHtml(n.base_id)} · v${n.version}</div>
+          <div class="node-row-meta">${escapeHtml(n.base_id)} · v${n.version}${live ? "" : " · archived"}</div>
         </div>
         <div class="node-row-actions">
           <button type="button" class="btn-focus" title="Show on graph">◎</button>
-          <button type="button" class="btn-del-node" title="Delete node">×</button>
+          ${restoreBtn}
+          <button type="button" class="btn-del-node" title="Delete this version only (other versions kept)">×</button>
         </div>
       </div>`;
     })
@@ -1154,7 +1164,7 @@ function renderNodeInventory() {
 
   container.querySelectorAll(".node-row").forEach((row) => {
     row.addEventListener("click", (e) => {
-      if (e.target.closest(".btn-del-node")) return;
+      if (e.target.closest(".btn-del-node, .btn-make-live, .btn-focus")) return;
       focusInventoryNode(row.dataset.nodeId);
     });
   });
@@ -1168,9 +1178,44 @@ function renderNodeInventory() {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const row = btn.closest(".node-row");
-      deleteNodeById(row.dataset.entityType, row.dataset.baseId);
+      deleteNodeVersion(
+        row.dataset.nodeId,
+        row.dataset.entityType,
+        row.dataset.baseId,
+        row.dataset.isCurrent === "true",
+      );
     });
   });
+  container.querySelectorAll(".btn-make-live").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const row = btn.closest(".node-row");
+      makeVersionLive(row.dataset.nodeId, row.dataset.entityType, row.dataset.baseId);
+    });
+  });
+}
+
+async function makeVersionLive(nodeId, entityType, baseId) {
+  const label = baseId || nodeId;
+  if (
+    !confirm(
+      `Make this version live?\n\n${label} will become the active version. The current live version will be archived (not deleted).`,
+    )
+  ) {
+    return;
+  }
+  try {
+    const res = await api(`/api/graph/versions/${encodeURIComponent(nodeId)}/make-current`, {
+      method: "POST",
+    });
+    showToast(res.message || "Version is now live");
+    if (entityType === "user_story") {
+      sessionStorage.setItem("kg_story_focus", nodeId);
+    }
+    await reloadDashboard(nodeId, entityType === "user_story" ? nodeId : null);
+  } catch (err) {
+    showToast(err.message, "error");
+  }
 }
 
 function focusInventoryNode(nodeId) {
@@ -1186,16 +1231,20 @@ function focusInventoryNode(nodeId) {
   }
 }
 
-async function deleteNodeById(entityType, baseId) {
-  if (!confirm(`Delete "${baseId}" and all its relationships from Neo4j?`)) return;
+async function deleteNodeVersion(nodeId, entityType, baseId, isLive) {
+  const msg = isLive
+    ? `Delete only this live version of "${baseId}"?\n\nOlder archived versions will stay in Neo4j — you can restore them with ↩. If this is the only version, it will be removed entirely.`
+    : `Delete this archived version of "${baseId}"?\n\nOther versions (including the live one) will not be removed.`;
+  if (!confirm(msg)) return;
   try {
-    await api(`/api/nodes/${entityType}/${encodeURIComponent(baseId)}${storyParam()}`, { method: "DELETE" });
-    if (selectedNode?.base_id === baseId) {
+    const res = await api(`/api/graph/versions/${encodeURIComponent(nodeId)}`, { method: "DELETE" });
+    if (selectedNode?.id === nodeId) {
       selectedNode = null;
       updatePanel();
     }
-    showToast(`Deleted ${baseId}`);
-    await reloadDashboard();
+    showToast(res.message || `Deleted version`);
+    const focusId = res.promoted_to_live || null;
+    await reloadDashboard(focusId, entityType === "user_story" ? focusId : null);
   } catch (err) {
     showToast(err.message, "error");
   }
@@ -1241,7 +1290,8 @@ function updatePanel() {
   if (!selectedNode) {
     details.classList.add("hidden");
     $("panelTitle").textContent = "Selected node";
-    $("panelHint").textContent = "Click a node to inspect or edit. Delete via × in Uploaded nodes.";
+    $("panelHint").textContent =
+      "Click a node to inspect. ↩ makes an archived version live; × deletes that version only (others kept).";
     return;
   }
 
@@ -1249,23 +1299,37 @@ function updatePanel() {
   $("panelHint").textContent = `${selectedNode.type} · ${selectedNode.base_id}`;
   details.classList.remove("hidden");
   const props = selectedNode.properties || {};
+  const isLive = selectedNode.is_current !== false;
   const rows = [
     ["ID", selectedNode.base_id],
     ["node_id", selectedNode.id],
-    ["Version", `v${selectedNode.version}`],
+    ["Version", `v${selectedNode.version}${isLive ? " (live)" : " (archived)"}`],
     ...Object.entries(props)
       .filter(([k]) => !["base_id", "version", "status"].includes(k))
       .slice(0, 8)
       .map(([k, v]) => [k, Array.isArray(v) ? v.join(", ") : String(v)]),
   ];
 
+  const restoreBtn = isLive
+    ? ""
+    : `<button type="button" class="btn sm primary" id="btnMakeLive">Make this version live</button>`;
+
   details.innerHTML =
     rows.map(([l, v]) => `<div class="row"><span class="label">${l}</span><div class="val">${escapeHtml(v)}</div></div>`).join("") +
     `<div class="actions">
-      <button type="button" class="btn sm ghost" id="btnEdit">Edit</button>
+      <button type="button" class="btn sm ghost" id="btnEdit"${isLive ? "" : " disabled title='Edit applies to the live version only'"}>Edit</button>
+      ${restoreBtn}
     </div>`;
 
   $("btnEdit")?.addEventListener("click", openEditModal);
+  $("btnMakeLive")?.addEventListener("click", () => {
+    const et =
+      selectedNode.entity_type ||
+      { UserStory: "user_story", Feature: "feature", APIEndpoint: "api_endpoint", TestCase: "test_case" }[
+        selectedNode.type
+      ];
+    makeVersionLive(selectedNode.id, et, selectedNode.base_id);
+  });
 }
 
 function escapeHtml(s) {
@@ -1429,13 +1493,12 @@ $("editForm").addEventListener("submit", async (e) => {
   }
 });
 
-$("storySelect").addEventListener("change", () => {
+$("storySelect").addEventListener("change", async () => {
   const sid = $("storySelect").value;
   if (sid) sessionStorage.setItem("kg_story_focus", sid);
   else sessionStorage.removeItem("kg_story_focus");
   clearStoryFocus();
-  if (sid) focusStoryView(sid);
-  else if (cy && cy.nodes().length) cy.fit(cy.elements(), 48);
+  await refreshGraph();
 });
 $("btnRefresh").addEventListener("click", async () => {
   try {

@@ -187,15 +187,20 @@ def preview_story_upload_delta(story_item: dict, base_id: str) -> dict:
     return delta
 
 
-def compute_story_flow_delta(story_base_id: str) -> dict:
+def compute_story_flow_delta(
+    story_base_id: str,
+    story_node_id: str | None = None,
+) -> dict:
     """
-    Delta of feature names in flows[] vs the immediately previous story version.
+    Delta of flows[] for the selected story version vs its immediate predecessor.
 
-    Example (v1 → v2): removed=[Payment], modified=[Login, PlanSwitch]
-    Example (v2 → v1): added=[Payment]
-    Example (v1 → v3): added=[Analytics], removed=[Payment], modified=[Login, …]
+    When story_node_id is set (story dropdown), compares that version only — not the
+  latest current version.
     """
-    story = gs.get_user_story(story_base_id)
+    if story_node_id:
+        story = gs.get_user_story_version(story_node_id)
+    else:
+        story = gs.get_user_story(story_base_id)
     if not story:
         return {"story_id": story_base_id, "has_changes": False}
 
@@ -208,10 +213,13 @@ def compute_story_flow_delta(story_base_id: str) -> dict:
     prev_story_node_id: str | None = None
     prev_content = ""
 
-    if len(history) < 2:
-        # First story version only — nothing to compare; not an "add" of every flow step.
+    current_v = int(story.get("version") or 1)
+    prev = next((h for h in history if int(h.get("version") or 0) == current_v - 1), None)
+
+    if not prev:
         return {
             "story_id": story_base_id,
+            "story_node_id": story.get("node_id"),
             "version": story.get("version"),
             "previous_version": None,
             "current_flows": current_flows,
@@ -223,7 +231,6 @@ def compute_story_flow_delta(story_base_id: str) -> dict:
             "has_changes": False,
         }
 
-    prev = history[-2]
     previous_version = prev.get("version")
     prev_story_node_id = prev.get("node_id")
     previous_flows = get_story_flows_by_node_id(prev_story_node_id)
@@ -238,6 +245,7 @@ def compute_story_flow_delta(story_base_id: str) -> dict:
     )
     return {
         "story_id": story_base_id,
+        "story_node_id": story.get("node_id"),
         "version": story.get("version"),
         "previous_version": previous_version,
         **delta,

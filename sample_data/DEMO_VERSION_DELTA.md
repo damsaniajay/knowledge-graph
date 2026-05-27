@@ -6,14 +6,14 @@
 |------|----------------|
 | **New entity** | Creates v1 — no prompt |
 | **Identical file** | Blocked as duplicate |
-| **Same entity, content changed** | UI asks: **Deprecate** (new version + history) or **Delete permanently** (wipe old, v1) |
+| **Same entity, content changed** | UI shows **Cancel** / **Continue** — new version saved automatically; history kept |
 | **No prompt / default API** | **Replace** — updates the current node in place (no extra Feature v2 on every upload) |
 
-Graph highlights (green / amber / red) appear only after **Deprecate** on a user story, when flows change vs the previous story version.
+Graph highlights (green / amber / red) appear when viewing a story version whose flows changed vs the previous version.
 
 ---
 
-After a **user story** re-upload with **Deprecate**, the graph highlights Feature nodes:
+After a **user story** re-upload (Continue on the confirm dialog), the graph highlights Feature nodes when comparing versions:
 
 | Visual | Meaning | CSS class |
 |--------|---------|-----------|

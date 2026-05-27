@@ -41,7 +41,9 @@ def get_graph(
     graph["focus_story_id"] = story_id
     graph["focus_story_node_id"] = story_node_id
     if story_id:
-        graph["story_flow_delta"] = compute_story_flow_delta(story_id)
+        graph["story_flow_delta"] = compute_story_flow_delta(
+            story_id, story_node_id=story_node_id
+        )
     return graph
 
 
@@ -52,8 +54,48 @@ def list_stories():
 
 @router.get("/nodes")
 def list_nodes():
-    """All uploaded nodes currently active in Neo4j."""
-    return gs.list_current_nodes()
+    """All node versions in Neo4j (live + archived) for the inventory sidebar."""
+    return gs.list_inventory_nodes()
+
+
+@router.delete("/versions/{node_id}")
+def delete_version(node_id: str):
+    """Delete one version only; other versions for the same base_id stay in Neo4j."""
+    result = gs.delete_node_version(node_id)
+    if not result.get("deleted"):
+        raise HTTPException(404, f"Node '{node_id}' not found")
+
+    entity_type = result.get("entity_type")
+    base_id = result.get("base_id")
+    if entity_type == "user_story" and base_id:
+        mapper.resync_graph(story_base_ids=[base_id])
+    elif entity_type == "feature" and base_id:
+        mapper.resync_graph(feature_base_ids=[base_id])
+    elif result.get("versions_remaining", 0) > 0:
+        mapper.resync_graph(full=True)
+
+    graph = gs.get_full_graph(story_base_id=base_id if entity_type == "user_story" else None)
+    return {**result, "graph": graph}
+
+
+@router.post("/versions/{node_id}/make-current")
+def make_version_current(node_id: str):
+    """Switch live version: archive current, promote this node_id (no permanent delete)."""
+    result = gs.make_version_current(node_id)
+    if not result.get("success"):
+        raise HTTPException(404, f"Node '{node_id}' not found")
+    if not result.get("already_current"):
+        entity_type = result.get("entity_type")
+        if entity_type == "user_story":
+            mapper.resync_graph(story_base_ids=[result["base_id"]])
+        elif entity_type == "feature":
+            mapper.resync_graph(feature_base_ids=[result["base_id"]])
+        else:
+            mapper.resync_graph(full=True)
+    return {
+        **result,
+        "graph": gs.get_full_graph(story_base_id=result.get("base_id")),
+    }
 
 
 @router.post("/repair-schema")
@@ -65,7 +107,7 @@ def repair_schema():
 @router.post("/relink")
 def relink_graph():
     """One full re-sync of flows + all edges (same as after any upload)."""
-    total = mapper.resync_graph()
+    total = mapper.resync_graph(full=True)
     return {
         "edges_created": total,
         "edge_count": len(total),

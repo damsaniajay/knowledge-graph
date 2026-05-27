@@ -32,9 +32,23 @@ from services.content_hash import (
 from services.graph_model import (
     DEFAULT_COUPLING,
     DEFAULT_STATUS,
+    REL_BLOCKS,
+    REL_DEPENDS_ON,
+    REL_HAS_FEATURE,
+    REL_HAS_TEST_CASE,
     REL_PREVIOUS_VERSION,
+    REL_USES_API,
     STATUS_ARCHIVED,
     VALID_REL_TYPES,
+)
+
+# Only the live UserStory should own these; archived versions must not keep them.
+_ARCHIVED_STORY_PRODUCT_RELS = (
+    REL_HAS_FEATURE,
+    REL_USES_API,
+    REL_HAS_TEST_CASE,
+    REL_DEPENDS_ON,
+    REL_BLOCKS,
 )
 from services.versioning_fields import (
     CYPHER_ACTIVE_EDGE,
@@ -98,27 +112,20 @@ def _allocate_version(
     Allocate next version id for upload.
 
     version_policy:
-      - deprecate: keep old versions archived, new becomes v+1
-      - delete: hard-delete all previous versions for this base_id, new becomes v1
-      - replace: only used when creating first version (treated as deprecate, nothing to archive)
+      - deprecate: archive current, new becomes v+1 (version history)
+      - replace: first version only at allocate time (no current row to archive)
     """
+    if version_policy == "delete":
+        raise ValueError("version_policy 'delete' is not allowed; version history is always kept")
+
     if version_policy == "replace":
         version_policy = "deprecate"
 
     prev_node_id = None
-
-    if version_policy == "delete":
-        session.run(
-            f"MATCH (n:{label} {{base_id: $base_id}}) DETACH DELETE n",
-            base_id=base_id,
-        )
-        max_v = 0
-        is_new = True
-    else:
-        max_v = _max_version(session, label, base_id)
-        is_new = max_v == 0
-        if _current_version(session, label, base_id) > 0:
-            prev_node_id = _expire_current(session, label, base_id, now)
+    max_v = _max_version(session, label, base_id)
+    is_new = max_v == 0
+    if _current_version(session, label, base_id) > 0:
+        prev_node_id = _expire_current(session, label, base_id, now)
 
     new_v = max_v + 1
     node_id = _vid(base_id, new_v)
@@ -930,11 +937,53 @@ def get_test_case_history(base_id: str) -> list[dict]:
 
 # ─── Edges ───────────────────────────────────────────────────────────────────
 
-def prune_edges_on_archived_nodes() -> int:
-    """Remove relationships touching archived non-story nodes.
-
-    Archived UserStory versions keep their edges so both versions stay visible in the graph.
+def prune_archived_story_product_edges(story_base_id: str | None = None) -> int:
     """
+    Strip product edges from archived UserStory versions.
+
+    Only the live (is_current) story should link features/APIs/test cases; otherwise
+    deprecated versions still appear connected after a version upload or restore.
+    """
+    deleted = 0
+    with _get_driver().session() as session:
+        params: dict = {"rels": list(_ARCHIVED_STORY_PRODUCT_RELS)}
+        if story_base_id:
+            params["bid"] = story_base_id
+            match_story = (
+                "MATCH (s:UserStory {base_id: $bid}) "
+                "WHERE coalesce(s.is_current, false) = false"
+            )
+        else:
+            match_story = (
+                "MATCH (s:UserStory) WHERE coalesce(s.is_current, false) = false"
+            )
+
+        for cypher in (
+            f"""
+            {match_story}
+            MATCH (s)-[r]->()
+            WHERE type(r) IN $rels
+            DELETE r
+            """,
+            f"""
+            {match_story}
+            MATCH ()-[r:HAS_TEST_CASE]->(s)
+            DELETE r
+            """,
+            f"""
+            {match_story}
+            MATCH ()-[r:BLOCKS]->(s)
+            DELETE r
+            """,
+        ):
+            summary = session.run(cypher, **params).consume()
+            deleted += summary.counters.relationships_deleted
+    return deleted
+
+
+def prune_edges_on_archived_nodes() -> int:
+    """Remove product edges touching archived Feature/API/TestCase (not UserStory versions)."""
+    deleted = 0
     with _get_driver().session() as session:
         result = session.run(
             """
@@ -945,7 +994,8 @@ def prune_edges_on_archived_nodes() -> int:
             """
         )
         summary = result.consume()
-        return summary.counters.relationships_deleted
+        deleted += summary.counters.relationships_deleted
+    return deleted
 
 
 def create_edge(
@@ -997,7 +1047,7 @@ def delete_edge(from_node_id: str, rel_type: str, to_node_id: str) -> dict:
 
 
 def delete_node(entity_type: str, base_id: str) -> dict:
-    """Delete all versions of a node; DETACH DELETE removes every relationship."""
+    """Delete all versions of an entity by base_id."""
     label_map = {
         "user_story": "UserStory",
         "feature": "Feature",
@@ -1022,11 +1072,99 @@ def delete_node(entity_type: str, base_id: str) -> dict:
         "base_id": base_id,
         "entity_type": entity_type,
         "versions_removed": count,
+        "scope": "all_versions",
     }
 
 
+def delete_node_version(node_id: str) -> dict:
+    """
+    Delete one version (node_id) only. Other versions with the same base_id remain.
+
+    If the live version is removed and older versions exist, the highest remaining
+    version is promoted to live so you can keep working or use ↩ to switch again.
+    """
+    now = _now()
+    with _get_driver().session() as session:
+        label = _label_for_node_id(session, node_id)
+        if not label or label not in ("UserStory", "Feature", "APIEndpoint", "TestCase"):
+            return {"deleted": False, "reason": "not_found"}
+
+        row = session.run(
+            f"MATCH (n:{label} {{node_id: $id}}) "
+            "RETURN n.base_id AS base_id, n.version AS version, n.is_current AS is_current",
+            id=node_id,
+        ).single()
+        if not row:
+            return {"deleted": False, "reason": "not_found"}
+
+        base_id = row["base_id"]
+        was_current = bool(row["is_current"])
+        deleted_version = row["version"]
+
+        session.run(
+            f"MATCH (n {{node_id: $id}})-[r:{REL_PREVIOUS_VERSION}]-() DELETE r",
+            id=node_id,
+        )
+        session.run(
+            f"MATCH ()-[r:{REL_PREVIOUS_VERSION}]->(n {{node_id: $id}}) DELETE r",
+            id=node_id,
+        )
+        session.run("MATCH (n {node_id: $id}) DETACH DELETE n", id=node_id)
+
+        remaining = session.run(
+            f"MATCH (n:{label} {{base_id: $b}}) RETURN count(n) AS c",
+            b=base_id,
+        ).single()["c"]
+
+        promoted_node_id = None
+        if was_current and remaining > 0:
+            next_row = session.run(
+                f"MATCH (n:{label} {{base_id: $b}}) "
+                "RETURN n.node_id AS id ORDER BY n.version DESC LIMIT 1",
+                b=base_id,
+            ).single()
+            if next_row:
+                promoted_node_id = next_row["id"]
+
+    entity_type = LABEL_TO_TYPE.get(label, label.lower())
+    result = {
+        "deleted": True,
+        "node_id": node_id,
+        "base_id": base_id,
+        "entity_type": entity_type,
+        "deleted_version": deleted_version,
+        "versions_remaining": remaining,
+        "scope": "single_version",
+    }
+
+    if promoted_node_id:
+        promoted = make_version_current(promoted_node_id)
+        result["promoted_to_live"] = promoted_node_id
+        result["promoted_version"] = promoted.get("version")
+        result["message"] = (
+            f"Removed v{deleted_version}; v{promoted.get('version')} is now live "
+            f"(older versions kept — use ↩ to switch)"
+        )
+    elif remaining == 0:
+        result["message"] = f"Removed {base_id} (no versions left)"
+    else:
+        result["message"] = f"Removed v{deleted_version} of {base_id} ({remaining} version(s) kept)"
+
+    return result
+
+
 def list_current_nodes() -> dict:
-    """Inventory of all current (is_current) nodes in the knowledge graph."""
+    """Inventory of live (is_current) nodes only."""
+    inv = list_inventory_nodes()
+    live = [n for n in inv["nodes"] if n.get("is_current")]
+    by_type: dict[str, int] = {}
+    for n in live:
+        by_type[n["type"]] = by_type.get(n["type"], 0) + 1
+    return {"total": len(live), "by_type": by_type, "nodes": live}
+
+
+def list_inventory_nodes() -> dict:
+    """All KG node versions for the sidebar (live + archived), grouped by base_id."""
     labels = ["UserStory", "Feature", "APIEndpoint", "TestCase"]
     nodes = []
     by_type: dict[str, int] = {}
@@ -1035,11 +1173,11 @@ def list_current_nodes() -> dict:
         rows = session.run(
             """
             MATCH (n)
-            WHERE n.is_current = true
-              AND any(l IN labels(n) WHERE l IN $labels)
+            WHERE any(l IN labels(n) WHERE l IN $labels)
             RETURN labels(n)[0] AS type, n.node_id AS id, n.base_id AS base_id,
-                   n.version AS version, properties(n) AS props
-            ORDER BY type, n.base_id
+                   n.version AS version, n.is_current AS is_current, n.status AS status,
+                   properties(n) AS props
+            ORDER BY type, n.base_id, n.version DESC
             """,
             labels=labels,
         )
@@ -1047,6 +1185,7 @@ def list_current_nodes() -> dict:
             ntype = row["type"]
             props = dict(row["props"] or {})
             by_type[ntype] = by_type.get(ntype, 0) + 1
+            is_current = bool(row["is_current"]) if row["is_current"] is not None else False
             nodes.append({
                 "id": row["id"],
                 "base_id": row["base_id"],
@@ -1054,9 +1193,81 @@ def list_current_nodes() -> dict:
                 "entity_type": LABEL_TO_TYPE.get(ntype, ntype.lower()),
                 "label": _node_display_label(props),
                 "version": row["version"],
+                "is_current": is_current,
+                "status": row["status"] or ("active" if is_current else "archived"),
             })
 
     return {"total": len(nodes), "by_type": by_type, "nodes": nodes}
+
+
+def _label_for_node_id(session, node_id: str) -> str | None:
+    row = session.run(
+        "MATCH (n {node_id: $id}) RETURN labels(n)[0] AS label LIMIT 1",
+        id=node_id,
+    ).single()
+    return row["label"] if row else None
+
+
+def make_version_current(node_id: str, *, updated_by: str = "system") -> dict:
+    """
+    Archive the current live version for this base_id and promote the chosen version to live.
+
+    Does not delete history — switches which version is active (e.g. restore pre-upload flow).
+    """
+    now = _now()
+    with _get_driver().session() as session:
+        label = _label_for_node_id(session, node_id)
+        if not label or label not in ("UserStory", "Feature", "APIEndpoint", "TestCase"):
+            return {"success": False, "reason": "not_found"}
+
+        row = session.run(
+            f"MATCH (n:{label} {{node_id: $id}}) "
+            "RETURN n.base_id AS base_id, n.is_current AS is_current, n.version AS version",
+            id=node_id,
+        ).single()
+        if not row:
+            return {"success": False, "reason": "not_found"}
+
+        base_id = row["base_id"]
+        if row["is_current"]:
+            return {
+                "success": True,
+                "already_current": True,
+                "node_id": node_id,
+                "base_id": base_id,
+                "version": row["version"],
+                "entity_type": LABEL_TO_TYPE.get(label, label.lower()),
+            }
+
+        if _current_version(session, label, base_id) > 0:
+            _expire_current(session, label, base_id, now)
+
+        feature_restore = ""
+        if label == "Feature":
+            feature_restore = ", n.name = coalesce(n.archived_name, n.name), n.archived_name = null"
+        elif label == "APIEndpoint":
+            feature_restore = ", n.endpoint_id = n.base_id"
+
+        session.run(
+            f"MATCH (n:{label} {{node_id: $id}}) "
+            f"SET n.is_current = true, n.status = $status, n.valid_to = null, "
+            f"n.valid_from = $now, n.updated_at = $now, n.updated_by = $by{feature_restore}",
+            id=node_id,
+            now=now,
+            by=updated_by,
+            status=DEFAULT_STATUS,
+        )
+
+    entity_type = LABEL_TO_TYPE.get(label, label.lower())
+    return {
+        "success": True,
+        "already_current": False,
+        "node_id": node_id,
+        "base_id": base_id,
+        "version": row["version"],
+        "entity_type": entity_type,
+        "message": f"{base_id} v{row['version']} is now the live version",
+    }
 
 
 def clear_knowledge_graph() -> dict:
@@ -1214,13 +1425,14 @@ def _serialize_props(props: dict) -> dict:
 
 _GRAPH_LABELS = "['UserStory','Feature','APIEndpoint','TestCase']"
 
+# Product relationships only — never PREVIOUS_VERSION (other story versions are
+# viewed by selecting them in the story dropdown, not by walking version edges).
 _STORY_SUBGRAPH_RELS = [
     "HAS_FEATURE",
     "USES_API",
     "HAS_TEST_CASE",
     "NEXT_STEP",
     "DEPENDS_ON",
-    "PREVIOUS_VERSION",
 ]
 
 _CYPHER_GRAPH_EDGE_FILTER = f"""
@@ -1236,8 +1448,9 @@ _CYPHER_GRAPH_EDGE_FILTER = f"""
 
 
 def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
-    """BFS from seed story node(s) over product relationships (no response-schema layer)."""
+    """BFS from one story version over product relationships only (no other UserStory nodes)."""
     ids = {i for i in seed_ids if i}
+    allowed_stories = set(ids)
     frontier = set(ids)
     rels = _STORY_SUBGRAPH_RELS
     while frontier:
@@ -1247,7 +1460,7 @@ def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
             WHERE a.node_id IN $frontier AND type(r) IN $rels
               AND NOT b:APIResponseSchema
               AND any(l IN labels(b) WHERE l IN ['UserStory','Feature','APIEndpoint','TestCase'])
-            RETURN DISTINCT b.node_id AS id
+            RETURN DISTINCT b.node_id AS id, labels(b)[0] AS label
             """,
             frontier=list(frontier),
             rels=rels,
@@ -1255,9 +1468,12 @@ def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
         next_frontier: set[str] = set()
         for row in rows:
             nid = row["id"]
-            if nid and nid not in ids:
-                ids.add(nid)
-                next_frontier.add(nid)
+            if not nid or nid in ids:
+                continue
+            if row["label"] == "UserStory" and nid not in allowed_stories:
+                continue
+            ids.add(nid)
+            next_frontier.add(nid)
         if not next_frontier:
             break
         frontier = next_frontier
@@ -1266,6 +1482,10 @@ def _collect_subgraph_node_ids(session, seed_ids: list[str]) -> set[str]:
 
 def get_story_subgraph(story_node_id: str) -> dict:
     """Only nodes and edges reachable from one UserStory version (for story-focused UI)."""
+    from services.linking_engine import materialize_story_version_links
+
+    materialize_story_version_links(story_node_id)
+
     nodes, edges = [], []
     seen_n, seen_e = set(), set()
 
