@@ -357,6 +357,53 @@ features:
   - /vas/subscriptions
   depends_on:
   - Login
+test_cases:
+- tc_id: TC-login-001
+  linked_to: Login
+  title: Valid login with correct credentials
+  type: positive
+  test_layer: api
+  steps:
+  - Enter valid MSISDN: 9876543210
+  - Enter correct password
+  - Submit login form
+  expected_result: HTTP 200 — session token returned
+- tc_id: TC-login-002
+  linked_to: Login
+  title: Login with wrong password
+  type: negative
+  test_layer: api
+  steps:
+  - Enter valid MSISDN
+  - Enter incorrect password
+  - Submit login form
+  expected_result: HTTP 401 — invalid credentials
+- tc_id: TC-API-login-401
+  linked_to: POST:/auth/login
+  title: Login API returns 401 for invalid credentials
+  type: negative
+  test_layer: api
+  steps:
+  - POST /auth/login with valid msisdn and wrong password
+  expected_result: HTTP 401 — Invalid credentials
+- tc_id: TC-planfetch-001
+  linked_to: PlanFetch
+  title: Fetch current and recommended plans successfully
+  type: positive
+  test_layer: api
+  steps:
+  - User is logged in with valid token
+  - Call GET /plans?type=current
+  - Call GET /plans?type=recommended
+  expected_result: HTTP 200 — current and recommended plans returned
+- tc_id: TC-planfetch-002
+  linked_to: PlanFetch
+  title: Fetch plans without authentication
+  type: negative
+  test_layer: api
+  steps:
+  - Call GET /plans?type=current without session token
+  expected_result: HTTP 401 — unauthorized
 user_story:
   title: Plan Change
   content: As a subscriber, I want to change my current mobile plan so that I can
