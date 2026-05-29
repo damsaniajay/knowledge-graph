@@ -46,6 +46,9 @@ let currentLayoutMode = "layered";
 let layoutRunning = false;
 let inventoryData = { nodes: [], total: 0, by_type: {} };
 let lastStoryFlowDelta = null;
+let lastUploadImpact = null;
+let lastUploadImpactStoryId = null;
+let impactTcListVisible = sessionStorage.getItem("kg_impact_tc_visible") === "true";
 const graphCache = new Map();
 let graphRequestSeq = 0;
 let graphLoadingActiveSeq = 0;
@@ -213,6 +216,167 @@ function formatChangePreview(cp) {
   return parts.join(" · ");
 }
 
+function currentStoryImpact() {
+  const sid = selectedStoryBaseId();
+  if (!lastUploadImpact || !sid || lastUploadImpactStoryId !== sid) return null;
+  return lastUploadImpact;
+}
+
+function impactTcCount(impact) {
+  if (!impact) return 0;
+  const direct = impact.impacted_test_cases || [];
+  const indirect = impact.indirect_impacted_test_cases || [];
+  return impact.total_test_cases ?? direct.length + indirect.length;
+}
+
+function impactToggleLabel(total, expanded) {
+  return expanded ? "Hide list" : `Show list (${total})`;
+}
+
+const IMPACT_CATEGORY_LABELS = {
+  feature_removed: "Removed from flow",
+  feature_modified: "Feature modified",
+  downstream_added: "Downstream of new step",
+  story_linked: "Story-level",
+  flow_changed: "Flow changed",
+  transitive: "Transitive",
+  direct: "Direct",
+};
+
+function impactCategoryLabel(tc) {
+  const cat = tc.impact_category || "direct";
+  return IMPACT_CATEGORY_LABELS[cat] || cat.replace(/_/g, " ");
+}
+
+function formatImpactTcRow(tc, { indirect = false } = {}) {
+  const id = tc.base_id || tc.node_id || "TC";
+  const title = tc.title && tc.title !== id ? tc.title : "";
+  const cat = tc.impact_category || (indirect ? "transitive" : "direct");
+  const catLabel = impactCategoryLabel(tc);
+  const hops = tc.hops ? `<span class="impact-hop">hop ${tc.hops}</span>` : "";
+  const via = tc.via_feature
+    ? `<span class="impact-via">Feature: ${escapeHtml(tc.via_feature)}</span>`
+    : "";
+  const chain =
+    tc.dependency_chain && tc.dependency_chain.length > 1
+      ? `<span class="impact-chain">Chain: ${escapeHtml(tc.dependency_chain.join(" → "))}</span>`
+      : "";
+  const trigger = tc.triggered_by
+    ? `<span class="impact-trigger">Triggered by: ${escapeHtml(tc.triggered_by)}</span>`
+    : "";
+
+  return `
+    <li class="impact-row${indirect ? " impact-indirect" : ""}">
+      <div class="impact-row-head">
+        ${indirect ? '<span class="impact-arrow" aria-hidden="true">↳</span>' : ""}
+        <span class="impact-cat impact-cat-${escapeHtml(cat)}">${escapeHtml(catLabel)}</span>
+        <strong class="impact-tc-id">${escapeHtml(id)}</strong>
+        ${hops}
+      </div>
+      ${title ? `<div class="impact-tc-title">${escapeHtml(title)}</div>` : ""}
+      <div class="impact-row-reason">${escapeHtml(tc.reason || "Needs review after story change")}</div>
+      ${via || chain || trigger ? `<div class="impact-row-meta">${via}${chain}${trigger}</div>` : ""}
+    </li>`;
+}
+
+function formatImpactTcListItems(impact) {
+  const direct = impact.impacted_test_cases || [];
+  const indirect = impact.indirect_impacted_test_cases || [];
+  let html = "<ul class=\"impact-tc-list\">";
+  for (const tc of direct) {
+    html += formatImpactTcRow(tc);
+  }
+  for (const tc of indirect) {
+    html += formatImpactTcRow(tc, { indirect: true });
+  }
+  html += "</ul>";
+  return html;
+}
+
+/** Collapsible impacted-TC block for graph banner (and upload preview). */
+function formatImpactSection(impact) {
+  const total = impactTcCount(impact);
+  if (!total) return "";
+  const expanded = impactTcListVisible;
+  const summary = impact.impact_summary
+    ? `<p class="impact-summary">${escapeHtml(impact.impact_summary)}</p>`
+    : "";
+  return `
+    <div class="impact-section" data-impact-section>
+      <div class="impact-section-header">
+        <span class="impact-title">Test cases to review (${total})</span>
+        <button type="button" class="impact-toggle-btn link-btn" data-action="toggle-impact-tc" data-total="${total}" aria-expanded="${expanded}">
+          ${escapeHtml(impactToggleLabel(total, expanded))}
+        </button>
+      </div>
+      ${summary}
+      <div class="impact-section-body${expanded ? "" : " hidden"}" data-impact-body>
+        ${formatImpactTcListItems(impact)}
+      </div>
+    </div>`;
+}
+
+function markImpactedTestCasesOnGraph(impact) {
+  if (!cy) return;
+  cy.nodes().removeClass("version-impacted");
+  if (!impact) return;
+  const all = [
+    ...(impact.impacted_test_cases || []),
+    ...(impact.indirect_impacted_test_cases || []),
+  ];
+  for (const tc of all) {
+    if (!tc?.node_id) continue;
+    const el = cy.getElementById(tc.node_id);
+    if (el.length) el.addClass("version-impacted");
+  }
+}
+
+function renderImpactSidebar(impact) {
+  const panel = $("impactPanel");
+  const body = $("impactPanelBody");
+  const hint = $("impactPanelHint");
+  const toggleBtn = $("btnToggleImpactTc");
+  if (!panel || !body) return;
+
+  const total = impactTcCount(impact);
+  if (!total) {
+    panel.classList.add("hidden");
+    body.innerHTML = "";
+    body.classList.add("hidden");
+    toggleBtn?.classList.add("hidden");
+    if (hint) {
+      hint.textContent = "Shown after a new user story version is uploaded.";
+    }
+    return;
+  }
+
+  const ver =
+    impact.old_version != null && impact.new_version != null
+      ? `US1 v${impact.old_version} → v${impact.new_version}`
+      : "";
+  if (hint) {
+    const why = impact.impact_summary ? ` Why: ${impact.impact_summary}.` : "";
+    hint.textContent = ver
+      ? `${ver} — ${total} test case${total === 1 ? "" : "s"} impacted.${why} Use Show list for details.`
+      : `${total} test case${total === 1 ? "" : "s"} impacted.${why} Use Show list for details.`;
+  }
+  body.innerHTML = formatImpactTcListItems(impact);
+  body.classList.toggle("hidden", !impactTcListVisible);
+  if (toggleBtn) {
+    toggleBtn.classList.remove("hidden");
+    toggleBtn.textContent = impactToggleLabel(total, impactTcListVisible);
+    toggleBtn.dataset.total = String(total);
+    toggleBtn.setAttribute("aria-expanded", String(impactTcListVisible));
+  }
+  panel.classList.remove("hidden");
+}
+
+function toggleImpactTcListVisible() {
+  impactTcListVisible = !impactTcListVisible;
+  sessionStorage.setItem("kg_impact_tc_visible", impactTcListVisible ? "true" : "false");
+  applyStoryVersionDelta(lastStoryFlowDelta, currentStoryImpact() || lastUploadImpact);
+}
+
 function renderUploadPreview(data) {
   const box = $("uploadPreview");
   const p = data.preview || {};
@@ -249,10 +413,13 @@ function renderUploadPreview(data) {
     }
   }
 
+  const impactHtml = formatImpactSection(data.impact_preview);
+
   box.innerHTML = `
     ${isAuto ? `<span class="detect-badge">Auto-detected: ${escapeHtml(typeLabel)}</span>` : `<span class="type-badge">${escapeHtml(typeLabel)}</span>`}
     ${data.item_count > 1 ? `<div class="hint">${data.item_count} items in file</div>` : ""}
-    <dl>${rows}</dl>`;
+    <dl>${rows}</dl>
+    ${impactHtml}`;
   box.classList.remove("hidden");
 }
 
@@ -328,13 +495,26 @@ async function uploadPendingFile() {
     if (res.story_flow_delta) {
       lastStoryFlowDelta = res.story_flow_delta;
     }
+    if (res.impact) {
+      lastUploadImpact = res.impact;
+      lastUploadImpactStoryId = res.impact.base_id || res.base_id || null;
+    } else if (res.entity_type === "user_story") {
+      lastUploadImpact = null;
+      lastUploadImpactStoryId = null;
+    }
     await reloadDashboard(newId, storyNodeId);
+    if (res.impact) {
+      applyStoryVersionDelta(res.story_flow_delta || lastStoryFlowDelta, res.impact);
+    }
     const edgeMsg = res.edges_created?.length ? ` · ${res.edges_created.length} edge(s)` : "";
     const countMsg = res.count > 1 ? `${res.count} items` : res.base_id;
     const idMeta = res.identity?.[0];
     const deltaHint = idMeta?.delta_summary ? ` · ${idMeta.delta_summary}` : "";
     const verHint = idMeta?.is_version_update ? " (new version)" : "";
-    const baseToast = `Uploaded ${countMsg}${verHint} from file${edgeMsg}${deltaHint}`;
+    const impactN = res.impact?.total_test_cases;
+    const impactHint =
+      impactN > 0 ? ` · ${impactN} test case(s) impacted — see sidebar + graph banner` : "";
+    const baseToast = `Uploaded ${countMsg}${verHint} from file${edgeMsg}${deltaHint}${impactHint}`;
     showToast(res.story_flow_delta?.has_changes ? res.message || baseToast : baseToast);
     clearPendingFile();
   } catch (err) {
@@ -351,6 +531,15 @@ async function uploadPendingFile() {
     $("btnUpload").disabled = !pendingFile;
     $("btnUpload").textContent = "Upload to Neo4j";
   }
+}
+
+function initImpactToggle() {
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action='toggle-impact-tc']");
+    if (!btn) return;
+    e.preventDefault();
+    toggleImpactTcListVisible();
+  });
 }
 
 function initUpload() {
@@ -518,15 +707,34 @@ async function fetchGraphCached({ force = false } = {}) {
   return cloneGraph(graph);
 }
 
-function applyStoryVersionDelta(delta) {
+function applyStoryVersionDelta(delta, impactOverride = null) {
   const banner = $("storyDeltaBanner");
+  const impact = impactOverride || currentStoryImpact();
+  renderImpactSidebar(impact);
   if (!cy) return;
 
   cy.elements().removeClass("version-added version-modified version-removed version-inactive");
+  markImpactedTestCasesOnGraph(impact);
 
-  if (!delta?.has_changes) {
+  const impactHtml = formatImpactSection(impact);
+  const hasImpact = Boolean(impactHtml);
+  const hasFlowDelta = Boolean(delta?.has_changes);
+
+  if (!hasFlowDelta && !hasImpact) {
     banner?.classList.add("hidden");
     if (banner) banner.innerHTML = "";
+    return;
+  }
+
+  if (!hasFlowDelta && hasImpact) {
+    if (banner) {
+      const ver =
+        impact.old_version != null && impact.new_version != null
+          ? `v${impact.old_version} → v${impact.new_version}`
+          : "";
+      banner.innerHTML = `<span class="delta-title">Story upload impact${ver ? ` (${escapeHtml(ver)})` : ""}</span>${impactHtml}`;
+      banner.classList.remove("hidden");
+    }
     return;
   }
 
@@ -562,7 +770,8 @@ function applyStoryVersionDelta(delta) {
       delta.previous_version != null
         ? `v${delta.previous_version} → v${delta.version}`
         : `v${delta.version}`;
-    banner.innerHTML = `<span class="delta-title">Story flow change (${escapeHtml(ver)})</span>${parts.join("")}`;
+    banner.innerHTML =
+      `<span class="delta-title">Story flow change (${escapeHtml(ver)})</span>${parts.join("")}${impactHtml}`;
     banner.classList.remove("hidden");
   }
 }
@@ -573,6 +782,7 @@ const STORY_FOCUS_REL_TYPES = new Set([
   "USES_API",
   "HAS_TEST_CASE",
   "DEPENDS_ON",
+  "DEPENDENCY",
   "HAS_RESPONSE_SCHEMA",
   "VALIDATES_AGAINST",
   "PREVIOUS_VERSION",
@@ -770,6 +980,15 @@ function initCytoscape() {
           "border-color": "#ef5f6b",
           "border-width": 3,
           "border-style": "dashed",
+        },
+      },
+      {
+        selector: "node.version-impacted",
+        style: {
+          "border-color": "#e879f9",
+          "border-width": 4,
+          width: 48,
+          height: 48,
         },
       },
       {
@@ -1145,7 +1364,14 @@ function applyGraph(graph, newNodeId = null) {
   } else {
     lastStoryFlowDelta = null;
   }
-  applyStoryVersionDelta(lastStoryFlowDelta);
+  if (graph.story_upload_impact?.total_test_cases) {
+    lastUploadImpact = graph.story_upload_impact;
+    lastUploadImpactStoryId = graph.story_upload_impact.base_id || graph.story_id || null;
+  }
+  applyStoryVersionDelta(
+    lastStoryFlowDelta,
+    graph.story_upload_impact || currentStoryImpact(),
+  );
   if (focusNodeId) focusStoryView(focusNodeId);
 
   if (newNodeId) {
@@ -1579,7 +1805,12 @@ $("editForm").addEventListener("submit", async (e) => {
 $("storySelect").addEventListener("change", async () => {
   const sid = $("storySelect").value;
   if (sid) sessionStorage.setItem("kg_story_focus", sid);
-  else sessionStorage.removeItem("kg_story_focus");
+  else {
+    sessionStorage.removeItem("kg_story_focus");
+    lastUploadImpact = null;
+    lastUploadImpactStoryId = null;
+    renderImpactSidebar(null);
+  }
   clearStoryFocus();
   try {
     await refreshGraph(null, { loadingLabel: "Switching story…" });
@@ -1600,6 +1831,7 @@ $("btnRefresh").addEventListener("click", async () => {
 async function boot() {
   renderAddFields();
   initUpload();
+  initImpactToggle();
   initLayoutControls();
   initGraphViewport();
   updateUploadHint();

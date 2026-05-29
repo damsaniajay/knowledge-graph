@@ -425,6 +425,10 @@ def resolve_test_case(item: dict) -> tuple[dict, dict]:
     linked = item.get("linked_to") or item.get("flow_id") or ""
     if linked:
         item["linked_to"] = _resolve_linked_to(str(linked))
+    deps = item.get("depends_on_test_cases") or []
+    if isinstance(deps, str):
+        deps = [deps]
+    item["depends_on_test_cases"] = [str(d).strip() for d in deps if str(d).strip()]
 
     meta: dict[str, Any] = {"entity_type": "test_case"}
     matched = None
@@ -444,7 +448,8 @@ def resolve_test_case(item: dict) -> tuple[dict, dict]:
 
     # If linked_to still doesn't resolve to any existing entity, use LLM to map
     # it to the closest existing Feature/UserStory/APIEndpoint.
-    if linked and not matched and config.use_llm_entity_match() and not config.UPLOAD_FAST:
+    # TestCase linking should still use LLM even in UPLOAD_FAST mode.
+    if linked and not matched and config.use_llm_entity_match():
         try:
             resolved = gs.resolve_entity(str(item.get("linked_to") or "").strip())
         except Exception:

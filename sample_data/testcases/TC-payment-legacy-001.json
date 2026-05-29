@@ -1,0 +1,16 @@
+{
+  "tc_id": "TC-payment-legacy-001",
+  "linked_to": "Payment",
+  "depends_on_test_cases": [
+    "TC-planswitch-001"
+  ],
+  "title": "Legacy payment path with pay and activate endpoints",
+  "type": "positive",
+  "test_layer": "api",
+  "steps": [
+    "Ensure valid switch order exists from POST /plans/switch",
+    "Call POST /payments/pay",
+    "Call POST /payments/activate"
+  ],
+  "expected_result": "HTTP 200 — payment and activation completed"
+}

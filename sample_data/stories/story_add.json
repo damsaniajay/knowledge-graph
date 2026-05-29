@@ -1,6 +1,7 @@
 {
-    "title": "Plan Change",
-    "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must call POST /auth/login to authenticate, use GET /plans to view current and recommended plans, POST /plans/eligibility-check to validate eligibility, POST /plans/switch to select a new plan, then POST /payments/pay and POST /payments/activate to complete payment and activation. After successful activation, POST /notifications/send-confirmation is called to notify the subscriber.",
-    "depends_on": [],
-    "blocked_by": []
+  "title": "Plan Change",
+  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must call POST /auth/login to authenticate, use GET /plans to view current and recommended plans, POST /plans/eligibility-check to validate eligibility, POST /plans/switch to select a new plan, then POST /payments/pay and POST /payments/activate to complete payment and activation.",
+  "flows": ["Login", "PlanFetch", "EligibilityCheck", "PlanSwitch", "Payment"],
+  "depends_on": [],
+  "blocked_by": []
 }

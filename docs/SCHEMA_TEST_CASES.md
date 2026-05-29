@@ -37,6 +37,32 @@ Team / QA uploads `TC-*.json` after story + features exist in Neo4j.
 | `tc_id` unique per base_id | Versioning like other entities |
 | Link | `HAS_TEST_CASE` created by mapper on commit |
 
+### TestCase graph relations (Aravinda model)
+
+| Relation | Direction | Meaning |
+|----------|-----------|---------|
+| `HAS_TEST_CASE` | UserStory / Feature / APIEndpoint → TestCase | Coverage — this entity is validated by this test |
+| `DEPENDS_ON` | TestCase → TestCase | Execution order — this TC needs another TC first |
+| `DEPENDENCY` | TestCase → TestCase | Impact — prerequisite TC → dependent TC (“who needs me?”) |
+| `PART_OF` | TestCase → TestScenario / TestPlan / TestSuite | Grouping (future) |
+
+`depends_on_test_cases` on upload creates **both** `DEPENDS_ON` and mirrored `DEPENDENCY`:
+
+```text
+TC-planfetch-001 -[:DEPENDS_ON]-> TC-login-001
+TC-login-001     -[:DEPENDENCY]-> TC-planfetch-001
+```
+
+Impact query (direct + indirect):
+
+```cypher
+MATCH (root:TestCase {base_id: "TC-login-001"})
+MATCH (root)-[:DEPENDENCY*1..10]->(impacted:TestCase)
+RETURN impacted
+```
+
+API: `GET /api/graph/testcases/{base_id}/impact`
+
 ### API (existing)
 
 - `POST /api/nodes/testcases`

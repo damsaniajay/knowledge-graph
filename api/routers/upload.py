@@ -57,6 +57,25 @@ async def preview_upload(
         if parsed["entity_type"] == "bundle"
         else assess_upload_versioning(parsed, identity, raw_bytes=content)
     )
+    impact_preview = None
+    if (
+        parsed["entity_type"] == ENTITY_STORY
+        and assessment.get("will_create_version")
+        and parsed.get("items")
+    ):
+        from services import impact_analyser
+
+        base_id = (identity[0] if identity else {}).get("assigned_id") or parsed["items"][0].get(
+            "story_id"
+        )
+        if base_id:
+            try:
+                impact_preview = impact_analyser.preview_user_story_impact(
+                    parsed["items"][0], base_id
+                )
+            except Exception:
+                impact_preview = None
+
     return {
         "filename": file.filename,
         "entity_type": parsed["entity_type"],
@@ -70,6 +89,7 @@ async def preview_upload(
         "will_create_version": assessment.get("will_create_version", False),
         "change_preview": assessment.get("change_preview"),
         "version_target": assessment.get("version_target"),
+        "impact_preview": impact_preview,
     }
 
 

@@ -60,6 +60,16 @@
         </label>
         <div id="uploadPreview" class="upload-preview hidden"></div>
         <button type="button" id="btnUpload" class="btn primary" disabled>Upload to Neo4j</button>
+        <div id="impactPanel" class="impact-panel hidden" aria-live="polite">
+          <div class="impact-panel-head">
+            <div>
+              <h3>Impacted test cases</h3>
+              <p class="hint" id="impactPanelHint">Shown after a new user story version is uploaded.</p>
+            </div>
+            <button type="button" id="btnToggleImpactTc" class="btn ghost impact-toggle-btn hidden" data-action="toggle-impact-tc" aria-expanded="false">Show list</button>
+          </div>
+          <div id="impactPanelBody" class="impact-section-body hidden"></div>
+        </div>
       </section>
 
       <section class="panel panel-manual">
@@ -120,6 +130,7 @@
         <span class="lg delta-add" title="New in this story version">+ Added</span>
         <span class="lg delta-modify" title="Still in flow but scope changed">◎ Modified</span>
         <span class="lg delta-remove" title="Dropped from this story version">− Removed</span>
+        <span class="lg delta-impact" title="Test case needs review after story change">! Impacted TC</span>
       </div>
       <div class="layout-controls">
         <button id="btnLayoutMenu" class="layout-fab" type="button" title="Graph layout" aria-expanded="false">⊞</button>

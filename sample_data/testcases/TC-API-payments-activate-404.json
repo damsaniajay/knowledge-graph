@@ -1,0 +1,14 @@
+{
+  "tc_id": "TC-API-payments-activate-404",
+  "linked_to": "POST:/payments/activate",
+  "depends_on_test_cases": [
+    "TC-payment-legacy-001"
+  ],
+  "title": "Payments activate API returns 404 for unknown order",
+  "type": "negative",
+  "test_layer": "api",
+  "steps": [
+    "Call POST /payments/activate with an unknown order_id"
+  ],
+  "expected_result": "HTTP 404 — order not found"
+}

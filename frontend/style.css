@@ -491,6 +491,7 @@ body {
 .lg.delta-add { border-color: #3ecf8e; color: #3ecf8e; }
 .lg.delta-modify { border-color: #f5a623; color: #f5a623; }
 .lg.delta-remove { border-color: #ef5f6b; color: #ef5f6b; border-style: dashed; }
+.lg.delta-impact { border-color: #e879f9; color: #e879f9; }
 
 .story-delta-banner {
   position: absolute;
@@ -500,16 +501,18 @@ body {
   z-index: 18;
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-start;
   gap: 0.5rem;
-  max-width: min(92%, 720px);
+  max-width: min(92%, 820px);
+  max-height: min(42vh, 320px);
+  overflow-y: auto;
   padding: 0.55rem 0.85rem;
   border-radius: 8px;
   background: rgba(22, 27, 38, 0.94);
   border: 1px solid var(--border);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   font-size: 0.82rem;
-  pointer-events: none;
+  pointer-events: auto;
 }
 .story-delta-banner.hidden { display: none; }
 .story-delta-banner .delta-title {
@@ -535,6 +538,156 @@ body {
   background: rgba(239, 95, 107, 0.12);
   color: #ef5f6b;
   border: 1px dashed rgba(239, 95, 107, 0.5);
+}
+
+.impact-section {
+  flex: 1 1 100%;
+  margin-top: 0.35rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--border);
+}
+.impact-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+  flex-wrap: wrap;
+}
+.impact-section-body.hidden {
+  display: none;
+}
+.impact-toggle-btn {
+  flex-shrink: 0;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.45rem;
+  white-space: nowrap;
+}
+.impact-title {
+  font-weight: 600;
+  color: #e879f9;
+}
+.impact-block {
+  flex: 1 1 100%;
+  margin-top: 0.35rem;
+  padding-top: 0.45rem;
+  border-top: 1px solid var(--border);
+}
+.impact-summary {
+  flex: 1 1 100%;
+  margin: 0.15rem 0 0.35rem;
+  font-size: 0.76rem;
+  color: var(--muted);
+  font-style: italic;
+}
+.impact-tc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+.impact-row {
+  padding: 0.45rem 0;
+  border-bottom: 1px solid rgba(42, 51, 72, 0.65);
+}
+.impact-row:last-child {
+  border-bottom: none;
+}
+.impact-row-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-bottom: 0.2rem;
+}
+.impact-arrow {
+  color: #e879f9;
+  font-weight: 700;
+}
+.impact-cat {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+.impact-cat-feature_removed { color: #ef5f6b; border-color: rgba(239, 95, 107, 0.5); }
+.impact-cat-feature_modified { color: #f5a623; border-color: rgba(245, 166, 35, 0.5); }
+.impact-cat-downstream_added { color: #3ecf8e; border-color: rgba(62, 207, 142, 0.5); }
+.impact-cat-transitive { color: #a78bfa; border-color: rgba(167, 139, 250, 0.5); }
+.impact-cat-flow_changed,
+.impact-cat-story_linked,
+.impact-cat-direct { color: #8b95ad; }
+.impact-tc-id {
+  color: var(--text);
+}
+.impact-hop {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+.impact-tc-title {
+  font-size: 0.74rem;
+  color: var(--muted);
+  margin-bottom: 0.15rem;
+}
+.impact-row-reason {
+  color: var(--text);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  padding-left: 0.1rem;
+}
+.impact-row-meta {
+  margin-top: 0.2rem;
+  font-size: 0.7rem;
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.65rem;
+}
+.impact-row-meta span::before {
+  opacity: 0.7;
+}
+.impact-indirect .impact-row-reason {
+  color: #d8dce8;
+}
+
+.upload-preview .impact-block {
+  margin-top: 0.65rem;
+  padding-top: 0.5rem;
+}
+.upload-preview .impact-tc-list {
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.impact-panel {
+  margin-top: 0.85rem;
+  padding: 0.75rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(232, 121, 249, 0.45);
+  background: rgba(232, 121, 249, 0.08);
+}
+.impact-panel.hidden { display: none; }
+.impact-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+.impact-panel-head h3 {
+  font-size: 0.9rem;
+  color: #e879f9;
+  margin-bottom: 0.2rem;
+}
+.impact-panel .impact-section-body {
+  max-height: 200px;
+  overflow-y: auto;
+}
+.impact-panel .impact-tc-list {
+  margin: 0;
 }
 
 .toast {

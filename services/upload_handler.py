@@ -149,8 +149,24 @@ def process_upload(
                 story_base_ids=story_ids,
                 feature_base_ids=[base_id],
             )
+            if effective_version_policy == "deprecate":
+                deprecated_tcs = gs.deprecate_test_cases_for_linked_entity("feature", base_id)
+                if deprecated_tcs:
+                    sync_warnings.append(
+                        f"Deprecated linked test cases for feature {base_id}: {', '.join(sorted(deprecated_tcs))}"
+                    )
+                    mapper.resync_graph(full=True)
         elif entity_type == "test_case" and base_id:
             edges_total = mapper.resync_graph(test_case_base_ids=[base_id])
+        elif entity_type == "api_endpoint" and base_id:
+            edges_total = mapper.resync_graph(full=True)
+            if effective_version_policy == "deprecate":
+                deprecated_tcs = gs.deprecate_test_cases_for_linked_entity("api_endpoint", base_id)
+                if deprecated_tcs:
+                    sync_warnings.append(
+                        f"Deprecated linked test cases for endpoint {base_id}: {', '.join(sorted(deprecated_tcs))}"
+                    )
+                    mapper.resync_graph(full=True)
         else:
             edges_total = mapper.resync_graph(full=True)
     except Exception as e:
@@ -189,6 +205,18 @@ def process_upload(
             out["proposal_id"] = flow_meta["proposal_id"]
             out["proposed_flows"] = flow_meta.get("proposed_flows")
             out["message"] = "Story saved; flow proposal pending approval"
+    if entity_type == "user_story" and base_id:
+        history = gs.get_user_story_history(base_id)
+        if len(history) >= 2:
+            try:
+                from services import impact_analyser
+
+                impact = impact_analyser.analyse("user_story", base_id)
+                if impact:
+                    out["impact"] = impact
+            except Exception as e:
+                logger.warning("impact analysis failed: %s", e)
+
     if story_flow_delta:
         out["story_flow_delta"] = story_flow_delta
         if story_flow_delta.get("has_changes"):

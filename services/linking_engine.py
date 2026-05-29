@@ -10,7 +10,7 @@ import re
 import config
 from services import graph_service as gs
 from services.flow_derivation import clear_feature_catalog_cache, derive_flows
-from services.graph_model import REL_BLOCKS, REL_DEPENDS_ON, REL_HAS_FEATURE
+from services.graph_model import REL_BLOCKS, REL_DEPENDS_ON, REL_DEPENDENCY, REL_HAS_FEATURE
 from services.graph_model import REL_HAS_RESPONSE_SCHEMA, REL_HAS_TEST_CASE, REL_USES_API
 from services.graph_model import REL_VALIDATES_AGAINST
 
@@ -102,6 +102,7 @@ def _resync_scoped(
         for tc in gs.get_all_test_cases():
             edges.extend(_link_test_case_relationships(tc))
 
+    edges.extend(_ensure_test_case_dependency_mirrors())
     return edges
 
 
@@ -125,6 +126,39 @@ def _resync_graph() -> list:
 
     for tc in gs.get_all_test_cases():
         edges.extend(_link_test_case_relationships(tc))
+
+    edges.extend(_ensure_test_case_dependency_mirrors())
+    return edges
+
+
+def _ensure_test_case_dependency_mirrors() -> list:
+    """
+    Keep DEPENDENCY in sync with DEPENDS_ON for all current test cases.
+
+    DEPENDS_ON: (dependent)-[:DEPENDS_ON]->(prerequisite)
+    DEPENDENCY: (prerequisite)-[:DEPENDENCY]->(dependent)
+    """
+    edges: list = []
+    with gs._get_driver().session() as session:
+        for row in session.run(
+            "MATCH (dependent:TestCase)-[:DEPENDS_ON]->(prerequisite:TestCase) "
+            "RETURN dependent.node_id AS dependent, prerequisite.node_id AS prerequisite"
+        ):
+            dep = row.get("dependent")
+            pre = row.get("prerequisite")
+            if not dep or not pre:
+                continue
+            if gs.create_edge(pre, REL_DEPENDENCY, dep):
+                _link(edges, (pre, REL_DEPENDENCY, dep))
+
+        for row in session.run(
+            "MATCH (prerequisite:TestCase)-[r:DEPENDENCY]->(dependent:TestCase) "
+            "WHERE NOT (dependent)-[:DEPENDS_ON]->(prerequisite) "
+            "RETURN prerequisite.node_id AS a, dependent.node_id AS b"
+        ):
+            a, b = row.get("a"), row.get("b")
+            if a and b:
+                gs.delete_edge(a, REL_DEPENDENCY, b)
 
     return edges
 
@@ -597,5 +631,53 @@ def _link_test_case_relationships(tc: dict) -> list:
             if picked:
                 if gs.create_edge(tc_node, REL_VALIDATES_AGAINST, picked["node_id"]):
                     _link(edges, (tc_node, REL_VALIDATES_AGAINST, picked["node_id"]))
+
+    # TestCase prerequisites (paired edges for execution + impact queries):
+    #   (dependent)-[:DEPENDS_ON]->(prerequisite)
+    #   (prerequisite)-[:DEPENDENCY]->(dependent)
+    deps = tc.get("depends_on_test_cases") or []
+    if isinstance(deps, str):
+        deps = [deps]
+    expected_prereqs: set[str] = set()
+    for dep in deps:
+        key = str(dep or "").strip()
+        if not key:
+            continue
+        other = gs.get_test_case(key)
+        if not other:
+            for cand in gs.get_all_test_cases():
+                if (cand.get("title") or "").strip() == key:
+                    other = cand
+                    break
+        if not other:
+            continue
+        prereq_node = other.get("node_id")
+        if not prereq_node or prereq_node == tc_node:
+            continue
+        expected_prereqs.add(prereq_node)
+        if gs.create_edge(tc_node, REL_DEPENDS_ON, prereq_node):
+            _link(edges, (tc_node, REL_DEPENDS_ON, prereq_node))
+        if gs.create_edge(prereq_node, REL_DEPENDENCY, tc_node):
+            _link(edges, (prereq_node, REL_DEPENDENCY, tc_node))
+
+    with gs._get_driver().session() as session:
+        for row in session.run(
+            "MATCH (a:TestCase {node_id:$id})-[r:DEPENDS_ON]->(b:TestCase) "
+            "RETURN b.node_id AS b",
+            id=tc_node,
+        ):
+            tgt = row.get("b")
+            if tgt and tgt not in expected_prereqs:
+                gs.delete_edge(tc_node, REL_DEPENDS_ON, tgt)
+                gs.delete_edge(tgt, REL_DEPENDENCY, tc_node)
+
+        for row in session.run(
+            "MATCH (b:TestCase)-[r:DEPENDENCY]->(a:TestCase {node_id:$id}) "
+            "RETURN b.node_id AS b",
+            id=tc_node,
+        ):
+            src = row.get("b")
+            if src and src not in expected_prereqs:
+                gs.delete_edge(src, REL_DEPENDENCY, tc_node)
 
     return edges

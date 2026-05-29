@@ -38,9 +38,13 @@ def hash_feature(item: dict) -> str:
 
 def hash_test_case(item: dict) -> str:
     linked = item.get("linked_to") or item.get("flow_id") or ""
+    deps = item.get("depends_on_test_cases") or []
+    if isinstance(deps, str):
+        deps = [deps]
     payload = {
         "title": item.get("title"),
         "linked_to": linked,
+        "depends_on_test_cases": sorted(str(d).strip() for d in deps if str(d).strip()),
         "type": item.get("type", "positive"),
         "test_layer": item.get("test_layer", "api"),
         "steps": item.get("steps") or [],

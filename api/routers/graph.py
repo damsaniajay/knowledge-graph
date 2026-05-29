@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Query
 from services import graph_service as gs
 from services import linking_engine as mapper
 from services import schema_service
+from services.impact_analyser import compute_story_upload_impact
 from services.story_flow_delta import compute_story_flow_delta
 
 router = APIRouter(prefix="/api/graph", tags=["graph"])
@@ -40,6 +41,13 @@ def get_graph(
             graph["story_flow_delta"] = compute_story_flow_delta(
                 story_id, story_node_id=story_node_id
             )
+        if story_id:
+            try:
+                graph["story_upload_impact"] = compute_story_upload_impact(
+                    story_id, story_node_id=story_node_id
+                )
+            except Exception:
+                graph["story_upload_impact"] = None
     else:
         graph = gs.get_full_graph(story_base_id=story_id)
     graph["focus_story_id"] = graph.get("story_id") or story_id
@@ -56,6 +64,20 @@ def list_stories():
 def list_nodes():
     """All node versions in Neo4j (live + archived) for the inventory sidebar."""
     return gs.list_inventory_nodes()
+
+
+@router.get("/testcases/{base_id}/impact")
+def test_case_impact(base_id: str, max_hops: int = Query(10, ge=1, le=25)):
+    """
+    Impact analysis: test cases that directly or indirectly depend on this one.
+
+    Uses DEPENDENCY edges (prerequisite → dependent). For prerequisites this TC needs,
+    see `prerequisites` in the response (from DEPENDS_ON).
+    """
+    result = gs.get_test_case_impact(base_id, max_hops=max_hops)
+    if not result.get("found"):
+        raise HTTPException(404, f"TestCase '{base_id}' not found")
+    return result
 
 
 @router.delete("/versions/{node_id}")

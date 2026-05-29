@@ -9,6 +9,8 @@ Graph (no Flow nodes):
   (:Feature)-[:DEPENDS_ON]->(:Feature)   # dependent → prerequisite (from flows[] order)
   (:Feature|:UserStory|:APIEndpoint)-[:HAS_TEST_CASE]->(:TestCase)
   (:APIEndpoint)-[:HAS_RESPONSE_SCHEMA]->(:APIResponseSchema)
+  (:TestCase)-[:DEPENDS_ON]->(:TestCase)      # dependent → prerequisite (execution order)
+  (:TestCase)-[:DEPENDENCY]->(:TestCase)     # prerequisite → dependent (impact query)
   (:TestCase)-[:VALIDATES_AGAINST]->(:APIResponseSchema)
 
 Flows = ordered list on UserStory.flows (LLM/heuristic derived).
@@ -816,6 +818,7 @@ def save_test_case(
                     MATCH (n:TestCase {node_id: $node_id})
                     SET n.title = $title, n.type = $type, n.test_layer = $test_layer,
                         n.linked_to = $linked_to, n.steps = $steps,
+                        n.depends_on_test_cases = $depends_on_test_cases,
                         n.expected_result = $expected_result,
                         n.content_hash = $content_hash,
                         n.updated_at = $now, n.updated_by = $updated_by
@@ -826,6 +829,7 @@ def save_test_case(
                     test_layer=tc.get("test_layer", "api"),
                     linked_to=tc.get("linked_to", ""),
                     steps=json.dumps(tc.get("steps", [])),
+                    depends_on_test_cases=list(tc.get("depends_on_test_cases") or []),
                     expected_result=tc.get("expected_result", ""),
                     content_hash=content_hash,
                     now=now,
@@ -859,6 +863,7 @@ def save_test_case(
                 node_id: $node_id, base_id: $base_id,
                 title: $title, type: $type, test_layer: $test_layer,
                 linked_to: $linked_to,
+                depends_on_test_cases: $depends_on_test_cases,
                 steps: $steps, expected_result: $expected_result,
                 content_hash: $content_hash,
                 version: $version, is_current: true,
@@ -874,6 +879,7 @@ def save_test_case(
             type=tc.get("type", "positive"),
             test_layer=tc.get("test_layer", "api"),
             linked_to=tc.get("linked_to", ""),
+            depends_on_test_cases=list(tc.get("depends_on_test_cases") or []),
             steps=json.dumps(tc.get("steps", [])),
             expected_result=tc.get("expected_result", ""),
             content_hash=content_hash,
@@ -903,6 +909,7 @@ def get_test_case(base_id: str) -> dict | None:
             "MATCH (n:TestCase {base_id:$b, is_current:true}) "
             "RETURN n.node_id AS node_id, n.base_id AS base_id, n.title AS title, "
             "n.type AS type, n.test_layer AS test_layer, n.linked_to AS linked_to, "
+            "n.depends_on_test_cases AS depends_on_test_cases, "
             "n.steps AS steps, n.expected_result AS expected_result, n.version AS version",
             b=base_id,
         ).single()
@@ -919,8 +926,120 @@ def get_all_test_cases() -> list[dict]:
         return [dict(r) for r in session.run(
             "MATCH (n:TestCase {is_current:true}) "
             "RETURN n.node_id AS node_id, n.base_id AS base_id, n.title AS title, "
-            "n.type AS type, n.linked_to AS linked_to, n.version AS version"
+            "n.type AS type, n.linked_to AS linked_to, "
+            "n.depends_on_test_cases AS depends_on_test_cases, "
+            "n.version AS version"
         )]
+
+
+def get_test_case_impact(base_id: str, *, max_hops: int = 10) -> dict:
+    """
+    Impact analysis for a test case via DEPENDENCY edges (prerequisite → dependent).
+
+    Answers: which test cases directly or indirectly need this one?
+    """
+    root = get_test_case(base_id)
+    if not root:
+        return {"found": False, "base_id": base_id, "prerequisites": [], "dependents": []}
+
+    prerequisites: list[dict] = []
+    dependents: list[dict] = []
+
+    with _get_driver().session() as session:
+        for row in session.run(
+            "MATCH (root:TestCase {base_id: $bid, is_current: true})"
+            "-[:DEPENDS_ON]->(pre:TestCase) "
+            "RETURN pre.base_id AS base_id, pre.title AS title",
+            bid=base_id,
+        ):
+            prerequisites.append({"base_id": row["base_id"], "title": row["title"]})
+
+        depth = max(1, min(int(max_hops), 25))
+        # Neo4j does not allow parameters in variable-length relationship bounds.
+        chain_cypher = (
+            "MATCH (root:TestCase {base_id: $bid, is_current: true}) "
+            f"MATCH path = (root)-[:DEPENDENCY*1..{depth}]->(impacted:TestCase) "
+            "RETURN impacted.base_id AS base_id, impacted.title AS title, "
+            "length(path) AS hops, "
+            "[n IN nodes(path) | n.base_id] AS chain "
+            "ORDER BY hops, impacted.base_id"
+        )
+        for row in session.run(chain_cypher, bid=base_id):
+            chain = list(row["chain"] or [])
+            dependents.append({
+                "base_id": row["base_id"],
+                "title": row["title"],
+                "hops": row["hops"],
+                "chain": chain,
+                "prerequisite": chain[-2] if len(chain) >= 2 else base_id,
+            })
+
+    return {
+        "found": True,
+        "base_id": base_id,
+        "node_id": root.get("node_id"),
+        "title": root.get("title"),
+        "prerequisites": prerequisites,
+        "dependents": dependents,
+        "dependent_count": len(dependents),
+    }
+
+
+def deprecate_test_cases_for_linked_entity(
+    entity_type: str,
+    base_id: str,
+    *,
+    updated_by: str = "system",
+) -> list[str]:
+    """
+    Archive current TestCases linked to a deprecated Feature/APIEndpoint.
+    Returns affected TestCase base_ids.
+    """
+    if entity_type not in ("feature", "api_endpoint"):
+        return []
+
+    now = _now()
+    affected: list[str] = []
+    with _get_driver().session() as session:
+        linked_values: set[str] = {base_id}
+
+        if entity_type == "feature":
+            for row in session.run(
+                "MATCH (f:Feature {base_id: $b}) "
+                "RETURN DISTINCT f.name AS name, f.archived_name AS archived_name",
+                b=base_id,
+            ):
+                for name in (row.get("name"), row.get("archived_name")):
+                    n = (name or "").strip()
+                    if n:
+                        linked_values.add(n)
+        else:
+            info = session.run(
+                "MATCH (e:APIEndpoint {base_id: $b}) "
+                "RETURN e.path AS path, e.method AS method LIMIT 1",
+                b=base_id,
+            ).single()
+            if info:
+                path = (info.get("path") or "").strip()
+                method = (info.get("method") or "").upper().strip()
+                if path:
+                    linked_values.add(path)
+                if path and method:
+                    linked_values.add(f"{method}:{path}")
+
+        for row in session.run(
+            "MATCH (t:TestCase {is_current: true}) "
+            "WHERE t.linked_to IN $vals "
+            "RETURN DISTINCT t.base_id AS base_id",
+            vals=list(linked_values),
+        ):
+            tc_base = row.get("base_id")
+            if not tc_base:
+                continue
+            _expire_current(session, "TestCase", tc_base, now)
+            affected.append(tc_base)
+
+    return affected
 
 
 def get_test_case_history(base_id: str) -> list[dict]:
@@ -1319,7 +1438,8 @@ def get_test_cases_for_entity(node_id: str) -> list[dict]:
     with _get_driver().session() as session:
         return [dict(r) for r in session.run(
             "MATCH (e {node_id:$id})-[:HAS_TEST_CASE]->(tc:TestCase {is_current:true}) "
-            "RETURN tc.node_id AS node_id, tc.base_id AS base_id, tc.title AS title, tc.type AS type",
+            "RETURN tc.node_id AS node_id, tc.base_id AS base_id, tc.title AS title, "
+            "tc.type AS type, tc.linked_to AS linked_to",
             id=node_id,
         )]
 
@@ -1431,6 +1551,8 @@ _STORY_SUBGRAPH_RELS = [
     "USES_API",
     "HAS_TEST_CASE",
     "DEPENDS_ON",
+    "DEPENDENCY",
+    "VALIDATES_AGAINST",
 ]
 
 _CYPHER_GRAPH_EDGE_FILTER = f"""
