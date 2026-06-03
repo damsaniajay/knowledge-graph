@@ -1,0 +1,6 @@
+{
+  "name": "PushNotifications",
+  "description": "Registers devices and sends push alerts for account events (unrelated to plan change)",
+  "apis_used": ["/notifications/register", "/notifications/send"],
+  "depends_on": []
+}

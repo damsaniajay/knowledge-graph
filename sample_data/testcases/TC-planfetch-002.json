@@ -1,0 +1,10 @@
+{
+  "linked_to": "PlanFetch",
+  "title": "Fetch plans without authentication",
+  "type": "negative",
+  "test_layer": "api",
+  "steps": [
+    "Call GET /plans?type=current without session token"
+  ],
+  "expected_result": "HTTP 401 \u2014 unauthorized"
+}

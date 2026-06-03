@@ -1,0 +1,354 @@
+kind: knowledge_graph_bundle
+title: Plan Change — demo (lean)
+# Lean base graph: 10 APIs, 9 features, 9 test cases. Upload story_add.json / story_mod.json for flow deltas.
+openapi:
+  openapi: 3.0.0
+  info:
+    title: Airtel Plan Change API
+    version: 1.0.0
+  paths:
+    /auth/login:
+      post:
+        summary: Authenticate user and return session token
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - password
+                properties:
+                  msisdn:
+                    type: string
+                  password:
+                    type: string
+        responses:
+          '200':
+            description: Login successful
+          '401':
+            description: Invalid credentials
+    /plans:
+      get:
+        summary: Fetch plans — current or recommended
+        parameters:
+        - name: type
+          in: query
+          schema:
+            type: string
+            enum:
+            - current
+            - recommended
+          required: true
+        - name: msisdn
+          in: query
+          schema:
+            type: string
+          required: true
+        responses:
+          '200':
+            description: Plans list
+          '401':
+            description: Unauthorized
+    /plans/switch:
+      post:
+        summary: Create a plan switch order
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - plan_id
+                properties:
+                  msisdn:
+                    type: string
+                  plan_id:
+                    type: string
+        responses:
+          '200':
+            description: Order created
+    /plans/eligibility-check:
+      post:
+        summary: Validate eligibility (links when story_add is uploaded)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - plan_id
+                properties:
+                  msisdn:
+                    type: string
+                  plan_id:
+                    type: string
+        responses:
+          '200':
+            description: Eligibility result
+    /payments/pay:
+      post:
+        summary: Process payment for plan switch order
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                - payment_method
+                - amount
+                properties:
+                  order_id:
+                    type: string
+                  payment_method:
+                    type: string
+                  amount:
+                    type: number
+        responses:
+          '200':
+            description: Payment successful
+    /payments/activate:
+      post:
+        summary: Activate new plan after payment
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                properties:
+                  order_id:
+                    type: string
+        responses:
+          '200':
+            description: Plan activated
+          '404':
+            description: Order not found
+    /payments/initiate:
+      post:
+        summary: Start OTP payment (used when story_mod is uploaded)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                properties:
+                  order_id:
+                    type: string
+        responses:
+          '200':
+            description: Payment initiated
+    /payments/verify-otp:
+      post:
+        summary: Verify payment OTP (used when story_mod is uploaded)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                - otp
+                properties:
+                  order_id:
+                    type: string
+                  otp:
+                    type: string
+        responses:
+          '200':
+            description: Payment verified
+    /plans/activate:
+      post:
+        summary: Activate plan after OTP (used when story_mod is uploaded)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - order_id
+                properties:
+                  order_id:
+                    type: string
+        responses:
+          '200':
+            description: Plan activated
+    /support/tickets:
+      post:
+        summary: Raise support ticket (unrelated to plan change)
+        requestBody:
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - msisdn
+                - issue_type
+                - description
+                properties:
+                  msisdn:
+                    type: string
+                  issue_type:
+                    type: string
+                  description:
+                    type: string
+        responses:
+          '201':
+            description: Ticket created
+features:
+- name: Login
+  description: Authenticates the user and returns a session token
+  apis_used:
+  - /auth/login
+  depends_on: []
+- name: PlanFetch
+  description: Fetches current and recommended plans
+  apis_used:
+  - /plans
+  depends_on:
+  - Login
+- name: PlanSwitch
+  description: Switches the subscriber to a selected plan
+  apis_used:
+  - /plans/switch
+  depends_on:
+  - PlanFetch
+- name: Payment
+  description: Pays and activates the new plan
+  apis_used:
+  - /payments/pay
+  - /payments/activate
+  depends_on:
+  - PlanSwitch
+- name: EligibilityCheck
+  description: Validates plan eligibility (not in v1 story flow; attaches on story_add upload)
+  apis_used:
+  - /plans/eligibility-check
+  depends_on:
+  - PlanFetch
+- name: SupportTicket
+  description: Unrelated support journey
+  apis_used:
+  - /support/tickets
+  depends_on:
+  - Login
+- name: PaymentInitiate
+  description: OTP payment start (links on story_mod upload; no TCs in base bundle)
+  apis_used:
+  - /payments/initiate
+  depends_on:
+  - PlanSwitch
+- name: PaymentVerifyOtp
+  description: OTP verification (story_mod path)
+  apis_used:
+  - /payments/verify-otp
+  depends_on:
+  - PaymentInitiate
+- name: PlanActivate
+  description: Plan activation after OTP (story_mod path)
+  apis_used:
+  - /plans/activate
+  depends_on:
+  - PaymentVerifyOtp
+test_cases:
+- tc_id: TC-login-001
+  linked_to: Login
+  title: Valid login
+  type: positive
+  test_layer: api
+  steps:
+  - POST /auth/login with valid credentials
+  expected_result: HTTP 200 — session token returned
+- tc_id: TC-API-login-401
+  linked_to: POST:/auth/login
+  title: Login API returns 401 for invalid credentials
+  type: negative
+  test_layer: api
+  steps:
+  - POST /auth/login with wrong password
+  expected_result: HTTP 401 — Invalid credentials
+- tc_id: TC-planfetch-001
+  linked_to: PlanFetch
+  depends_on_test_cases:
+  - TC-login-001
+  title: Fetch plans after login
+  type: positive
+  test_layer: api
+  steps:
+  - GET /plans?type=current with valid token
+  expected_result: HTTP 200 — plans returned
+- tc_id: TC-planswitch-001
+  linked_to: PlanSwitch
+  depends_on_test_cases:
+  - TC-planfetch-001
+  title: Switch to selected plan
+  type: positive
+  test_layer: api
+  steps:
+  - POST /plans/switch with valid plan_id
+  expected_result: HTTP 200 — order created
+- tc_id: TC-payment-001
+  linked_to: Payment
+  depends_on_test_cases:
+  - TC-planswitch-001
+  title: Pay and activate plan
+  type: positive
+  test_layer: api
+  steps:
+  - POST /payments/pay then POST /payments/activate
+  expected_result: HTTP 200 — payment and activation successful
+- tc_id: TC-support-001
+  linked_to: SupportTicket
+  depends_on_test_cases:
+  - TC-login-001
+  title: Raise support ticket
+  type: positive
+  test_layer: api
+  steps:
+  - POST /support/tickets after login
+  expected_result: HTTP 201 — ticket created
+- tc_id: TC-payment-initiate-001
+  linked_to: PaymentInitiate
+  depends_on_test_cases:
+  - TC-planswitch-001
+  title: Start OTP payment
+  type: positive
+  test_layer: api
+  steps:
+  - POST /payments/initiate with order_id
+  expected_result: HTTP 200 — payment initiated
+- tc_id: TC-payment-verify-otp-001
+  linked_to: PaymentVerifyOtp
+  depends_on_test_cases:
+  - TC-payment-initiate-001
+  title: Verify payment OTP
+  type: positive
+  test_layer: api
+  steps:
+  - POST /payments/verify-otp with valid OTP
+  expected_result: HTTP 200 — payment verified
+- tc_id: TC-plan-activate-001
+  linked_to: PlanActivate
+  depends_on_test_cases:
+  - TC-payment-verify-otp-001
+  title: Activate plan after OTP
+  type: positive
+  test_layer: api
+  steps:
+  - POST /plans/activate with order_id
+  expected_result: HTTP 200 — plan activated
+user_story:
+  title: Plan Change
+  content: As a subscriber, I want to change my current mobile plan so that I can
+    get better benefits. The user must call POST /auth/login to authenticate, use
+    GET /plans to view current and recommended plans, POST /plans/switch to select
+    a new plan, then POST /payments/pay and POST /payments/activate to complete payment
+    and activation.
+  depends_on: []
+  blocked_by: []

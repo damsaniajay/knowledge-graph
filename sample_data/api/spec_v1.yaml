@@ -67,6 +67,8 @@ paths:
                 type: object
                 properties:
                   plans: { type: array }
+        "401":
+          description: Unauthorized — missing or invalid session
 
   /plans/switch:
     post:

@@ -1,0 +1,6 @@
+{
+  "title": "Invoice PDF Export",
+  "content": "As a finance user, I want to export monthly invoices as PDF so that I can archive them offline. The user calls GET /billing/invoices to list invoices and POST /billing/invoices/export to generate a downloadable PDF. This capability is separate from mobile plan change.",
+  "depends_on": [],
+  "blocked_by": []
+}

@@ -1,0 +1,10 @@
+{
+  "linked_to": "PlanSwitch",
+  "title": "Switch plan with invalid plan id",
+  "type": "negative",
+  "test_layer": "api",
+  "steps": [
+    "POST /plans/switch with invalid plan_id"
+  ],
+  "expected_result": "HTTP 400 \u2014 validation error"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Analytics",
+  "description": "Shows usage insights before plan change",
+  "apis_used": ["/analytics/usage"],
+  "depends_on": ["Login"]
+}

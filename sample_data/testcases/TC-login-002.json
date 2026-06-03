@@ -1,0 +1,12 @@
+{
+  "linked_to": "Login",
+  "title": "Login with wrong password",
+  "type": "negative",
+  "test_layer": "api",
+  "steps": [
+    "Enter valid MSISDN",
+    "Enter incorrect password",
+    "Submit login form"
+  ],
+  "expected_result": "HTTP 401 \u2014 invalid credentials"
+}

@@ -1,0 +1,11 @@
+{
+  "linked_to": "PlanSwitch",
+  "title": "Switch to valid plan successfully",
+  "type": "positive",
+  "test_layer": "api",
+  "steps": [
+    "Select target plan",
+    "POST /plans/switch"
+  ],
+  "expected_result": "HTTP 200 \u2014 switch order created"
+}

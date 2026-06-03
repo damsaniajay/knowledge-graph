@@ -1,0 +1,15 @@
+{
+  "tc_id": "TC-plan-activate-001",
+  "linked_to": "PlanActivate",
+  "depends_on_test_cases": [
+    "TC-payment-verify-otp-001"
+  ],
+  "title": "Activate selected plan after payment verification",
+  "type": "positive",
+  "test_layer": "api",
+  "steps": [
+    "Ensure payment is verified for the order",
+    "Call POST /plans/activate with order_id"
+  ],
+  "expected_result": "HTTP 200 — selected plan activated"
+}

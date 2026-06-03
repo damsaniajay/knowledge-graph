@@ -1,0 +1,7 @@
+{
+  "title": "Plan Change",
+  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must call POST /auth/login to authenticate, use GET /plans to view current and recommended plans, POST /plans/switch to select a new plan, then POST /payments/initiate to start payment. The user must verify payment using POST /payments/verify-otp, and finally POST /plans/activate to activate the selected plan.",
+  "flows": ["Login", "PlanFetch", "PlanSwitch", "PaymentInitiate", "PaymentVerifyOtp", "PlanActivate"],
+  "depends_on": [],
+  "blocked_by": []
+}

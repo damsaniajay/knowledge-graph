@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowledge Graph</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
+  <script src="https://unpkg.com/dagre@0.8.5/dist/dagre.min.js"></script>
+  <script src="https://unpkg.com/graphlib@2.1.8/dist/graphlib.min.js"></script>
+  <script src="https://unpkg.com/cytoscape-dagre@2.5.0/cytoscape-dagre.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-icon">◈</span>
+      <h1>Knowledge Graph</h1>
+    </div>
+    <div class="topbar-actions">
+      <label class="story-select">
+        <span>Story</span>
+        <select id="storySelect"><option value="">All nodes (full graph)</option></select>
+      </label>
+      <button id="btnRefresh" class="btn ghost" title="Refresh and re-link from Neo4j">↻ Refresh</button>
+      <button id="btnClearKG" class="btn danger-outline" title="Delete entire knowledge graph">Delete KG</button>
+      <span id="connStatus" class="status-pill">Checking…</span>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="sidebar">
+      <section class="panel">
+        <h2 id="panelTitle">Selected node</h2>
+        <p id="panelHint" class="hint">Click a node to inspect, edit, or add children beside it.</p>
+        <div id="nodeDetails" class="details hidden"></div>
+      </section>
+
+      <section class="panel panel-upload">
+        <h2>Upload file</h2>
+        <p class="hint" id="uploadHint">Drop JSON/YAML — bundle (API + features + story), or single story / feature / OpenAPI.</p>
+        <p class="hint persistence-hint">Uploads are saved to <strong>Neo4j</strong> (not the browser). Reload the page — data stays if Neo4j is connected.</p>
+        <div id="dropZone" class="drop-zone">
+          <input type="file" id="fileInput" accept=".json,.yaml,.yml" hidden />
+          <span class="drop-icon">↑</span>
+          <span class="drop-text">Drop file here or <button type="button" id="btnBrowse" class="link-btn">browse</button></span>
+          <span class="drop-formats">.json · .yaml · .yml</span>
+        </div>
+        <div id="fileChip" class="file-chip hidden"></div>
+        <label class="upload-type-label">Upload type
+            <select id="uploadType">
+            <option value="auto" selected>Auto-detect (recommended)</option>
+            <option value="user_story">User Story</option>
+            <option value="feature">Feature</option>
+            <option value="test_case">Test Case</option>
+            <option value="api_spec">API Spec (OpenAPI)</option>
+            <option value="bundle">Bundle (full setup)</option>
+          </select>
+        </label>
+        <div id="uploadPreview" class="upload-preview hidden"></div>
+        <button type="button" id="btnUpload" class="btn primary" disabled>Upload to Neo4j</button>
+        <div id="impactPanel" class="impact-panel hidden" aria-live="polite">
+          <div class="impact-panel-head">
+            <div>
+              <h3>Impacted test cases</h3>
+              <p class="hint" id="impactPanelHint">Shown after a new user story version is uploaded.</p>
+            </div>
+            <button type="button" id="btnToggleImpactTc" class="btn ghost impact-toggle-btn hidden" data-action="toggle-impact-tc" aria-expanded="false">Show list</button>
+          </div>
+          <div id="impactPanelBody" class="impact-section-body hidden"></div>
+        </div>
+      </section>
+
+      <section class="panel panel-manual">
+        <button type="button" id="toggleManual" class="collapse-toggle" aria-expanded="false">
+          <span>Manual entry (backup)</span>
+          <span class="chevron">›</span>
+        </button>
+        <div id="manualSection" class="manual-section hidden">
+          <p class="hint" id="addHint">Use when you don't have a file ready.</p>
+          <form id="addForm" class="form">
+            <label>Type
+              <select id="addType" required>
+                <option value="user_story">User Story</option>
+                <option value="feature">Feature</option>
+                <option value="test_case">Test Case</option>
+                <option value="endpoint">API Endpoint</option>
+              </select>
+            </label>
+            <div id="addFields"></div>
+            <button type="submit" class="btn secondary">Add manually</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="panel panel-inventory">
+        <div class="inventory-header">
+          <h2>Uploaded nodes</h2>
+          <span id="nodeCount" class="node-count">0</span>
+        </div>
+        <label class="inventory-filter">Filter
+          <select id="nodeFilter">
+            <option value="">All types</option>
+            <option value="UserStory">User Story</option>
+            <option value="Feature">Feature</option>
+            <option value="APIEndpoint">API</option>
+            <option value="TestCase">Test Case</option>
+          </select>
+        </label>
+        <div id="nodeInventory" class="node-inventory">
+          <p class="hint">No nodes in Neo4j yet.</p>
+        </div>
+      </section>
+    </aside>
+
+    <div class="graph-wrap">
+      <div id="graphLoading" class="graph-loading hidden" aria-live="polite">
+        <div class="graph-loading-spinner" aria-hidden="true"></div>
+        <span id="graphLoadingText">Loading graph…</span>
+      </div>
+      <div id="storyDeltaBanner" class="story-delta-banner hidden" aria-live="polite"></div>
+      <div id="cy"></div>
+      <div id="toast" class="toast hidden"></div>
+      <div class="legend">
+        <span class="lg us" title="Layer 1">L1 User Story</span>
+        <span class="lg ft" title="Layer 2">L2 Feature</span>
+        <span class="lg api" title="Layer 3">L3 API</span>
+        <span class="lg tc" title="Layer 4">L4 Test Case</span>
+        <span class="lg delta-add" title="New in this story version">+ Added</span>
+        <span class="lg delta-modify" title="Still in flow but scope changed">◎ Modified</span>
+        <span class="lg delta-remove" title="Dropped from this story version">− Removed</span>
+        <span class="lg delta-impact" title="Test case needs review after story change">! Impacted TC</span>
+      </div>
+      <div class="layout-controls">
+        <button id="btnLayoutMenu" class="layout-fab" type="button" title="Graph layout" aria-expanded="false">⊞</button>
+        <div id="layoutMenu" class="layout-menu hidden" role="menu">
+          <button type="button" class="layout-option active" data-layout="layered" role="menuitem">
+            <span class="check">✓</span> Type layers (drag ↔ within row)
+          </button>
+          <button type="button" class="layout-option" data-layout="hierarchical" role="menuitem">
+            <span class="check">✓</span> Hierarchical layout
+          </button>
+          <button type="button" class="layout-option" data-layout="force" role="menuitem">
+            <span class="check">✓</span> Force-based layout
+          </button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <div id="uploadConfirmModal" class="modal hidden" role="dialog" aria-labelledby="uploadConfirmTitle">
+    <div class="modal-card">
+      <h2 id="uploadConfirmTitle">Save as new version?</h2>
+      <p id="uploadConfirmText" class="hint">This upload updates an existing item. A new version will be saved and the previous version stays in history.</p>
+      <div class="modal-actions">
+        <button type="button" id="btnUploadConfirmCancel" class="btn ghost">Cancel</button>
+        <button type="button" id="btnUploadConfirmContinue" class="btn primary">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="duplicateModal" class="modal hidden" role="alertdialog" aria-labelledby="duplicateModalTitle">
+    <div class="modal-card">
+      <h2 id="duplicateModalTitle">Already uploaded</h2>
+      <p class="hint">This file matches content already stored in Neo4j. Upload is blocked until you change the file or remove the existing node.</p>
+      <ul id="duplicateList" class="duplicate-list"></ul>
+      <div class="modal-actions">
+        <button type="button" id="btnDuplicateClose" class="btn primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+
+  <div id="editModal" class="modal hidden">
+    <div class="modal-card">
+      <h2>Edit node</h2>
+      <p class="hint">Updates the current version in place. Re-upload a file with changes to create a new version automatically.</p>
+      <form id="editForm" class="form"></form>
+      <div class="modal-actions">
+        <button type="button" id="btnCancelEdit" class="btn ghost">Cancel</button>
+        <button type="submit" form="editForm" class="btn primary">Save changes</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

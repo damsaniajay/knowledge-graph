@@ -1,5 +1,6 @@
 {
-  "story_id": "US1",
   "title": "Plan Change",
-  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must login using OTP-based authentication, view existing plan with validity details, browse recommended plans with discount offers, select a new plan, apply a promo code, make payment, and activate the new plan with a confirmation SMS."
+  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must call POST /auth/login with OTP, use GET /plans for current and recommended offers, and POST /plans/switch with optional promo_code to select a new plan. Billing and activation are deferred to a separate release.",
+  "depends_on": [],
+  "blocked_by": []
 }

@@ -1,6 +1,6 @@
 {
-  "feature_id": "Payment",
   "name": "Payment",
   "description": "Processes payment and activates the new plan",
-  "apis_used": ["/payments/pay", "/payments/activate"]
+  "apis_used": ["/payments/pay", "/payments/activate"],
+  "depends_on": ["PlanSwitch"]
 }

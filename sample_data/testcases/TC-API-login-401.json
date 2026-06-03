@@ -1,0 +1,10 @@
+{
+  "linked_to": "POST:/auth/login",
+  "title": "Login API returns 401 for invalid credentials",
+  "type": "negative",
+  "test_layer": "api",
+  "steps": [
+    "POST /auth/login with valid msisdn and wrong password"
+  ],
+  "expected_result": "HTTP 401 \u2014 Invalid credentials"
+}

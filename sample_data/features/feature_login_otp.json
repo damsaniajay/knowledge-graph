@@ -1,0 +1,6 @@
+{
+  "name": "Login",
+  "description": "Authenticates the user with OTP and returns a session token",
+  "apis_used": ["/auth/login", "/auth/token/refresh", "/auth/otp/verify"],
+  "depends_on": []
+}

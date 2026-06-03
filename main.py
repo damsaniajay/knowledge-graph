@@ -6,8 +6,8 @@ Commands:
   setup-schema
   upload-story    <file.json>
   upload-feature  <file.json>
+  upload-endpoint <file.json>
   upload-api      <file.yaml>
-  upload-flow     <file.json>
   upload-testcase <file.json>
   show-graph      <story_base_id>
   show-history    <entity_type> <base_id>
@@ -17,7 +17,7 @@ Commands:
 Design:
   Every upload → save node → relationship_mapper.map_on_upload() runs automatically
   New entity  → v1 node created, edges to matching existing nodes
-  Re-upload   → v2 node created, old node expired (invalid_at set), new edges created
+  Re-upload   → v2 node created, old node expired (valid_to set), new edges created
 """
 
 import sys
@@ -30,8 +30,11 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="repla
 
 from services import schema_service
 from services import graph_service as gs
-from services import relationship_mapper as mapper
+from services import linking_engine as mapper
 from services import impact_analyser
+from services.entity_identity import resolve_item
+from services.story_flows import prepare_story_flows, proposal_after_save
+from services.openapi_ingest import ingest_openapi
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,15 +87,40 @@ def cmd_setup_schema() -> None:
     schema_service.setup()
 
 
+def cmd_setup_tracking() -> None:
+    from services.postgres_store import init_schema, check_connection
+
+    print(f"\n{_hr()}")
+    print("  SETUP POSTGRES TRACKING")
+    print(_hr())
+    result = init_schema()
+    print(f"  {result.get('message', result)}")
+    health = check_connection()
+    print(f"  Postgres: {'connected' if health.get('connected') else health}")
+
+
 def cmd_upload_story(file_path: str) -> None:
     data = _read_json(file_path)
+    data, identity = resolve_item("user_story", data)
+    data, flow_meta = prepare_story_flows(data)
     print(f"\n{_hr()}")
     print(f"  UPLOAD USER STORY")
     print(f"  File  : {file_path}")
-    print(f"  ID    : {data['story_id']}  —  {data['title']}")
+    print(f"  ID    : {data['story_id']}  —  {data['title']}  ({identity.get('identity_source', '')})")
+    if identity.get("delta_summary"):
+        print(f"  Delta : {identity['delta_summary']}")
+    src = (flow_meta.get("flow_derivation") or {}).get("source", "file")
+    print(f"  Flows : {data.get('flows', [])}  ({src})")
+    if flow_meta.get("needs_proposal"):
+        print(f"  Note  : FLOW_REQUIRE_APPROVAL=true — flows pending LLM proposal")
     print(_hr())
 
     result = gs.save_user_story(data)
+    if flow_meta.get("needs_proposal"):
+        flow_meta.update(proposal_after_save(data["story_id"]))
+        print(f"\n  Proposal : {flow_meta.get('proposal_id')}")
+        print(f"  Proposed : {flow_meta.get('proposed_flows', [])}")
+        print(f"  → Approve via POST /api/flow-proposals/{{id}}/approve then /commit")
     action = "INSERTED (v1)" if result["is_new"] else f"UPDATED  (v{result['version']})"
     print(f"\n  {action}  →  {result['node_id']}")
 
@@ -108,10 +136,11 @@ def cmd_upload_story(file_path: str) -> None:
 
 def cmd_upload_feature(file_path: str) -> None:
     data = _read_json(file_path)
+    data, identity = resolve_item("feature", data)
     print(f"\n{_hr()}")
     print(f"  UPLOAD FEATURE")
     print(f"  File    : {file_path}")
-    print(f"  ID      : {data['feature_id']}  —  {data['name']}")
+    print(f"  ID      : {data['feature_id']}  —  {data['name']}  ({identity.get('identity_source', '')})")
     print(f"  APIs    : {data.get('apis_used', [])}")
     print(_hr())
 
@@ -129,64 +158,51 @@ def cmd_upload_feature(file_path: str) -> None:
     _print_neo4j_hint()
 
 
-def cmd_upload_api(file_path: str) -> None:
-    spec      = _read_yaml(file_path)
-    version   = spec.get("info", {}).get("version", "?")
-    endpoints = _parse_openapi(spec)
-
-    print(f"\n{_hr()}")
-    print(f"  UPLOAD API SPEC  (v{version})")
-    print(f"  File      : {file_path}")
-    print(f"  Endpoints : {len(endpoints)}")
-    print(_hr())
-
-    for ep in endpoints:
-        result = gs.save_endpoint(ep)
-        action = "INSERTED" if result["is_new"] else f"UPDATED v{result['version']}"
-        print(f"\n  {action:<12}  {ep['method']:6} {ep['path']}")
-        print(f"               node_id: {result['node_id']}")
-        mapped = mapper.map_on_upload("api_endpoint", result["base_id"])
-        if mapped["edges_created"]:
-            print(f"               {len(mapped['edges_created'])} edge(s) created.")
-        if not result["is_new"]:
-            report = impact_analyser.analyse("api_endpoint", result["base_id"])
-            _print_impact_report(report)
-
-    _print_neo4j_hint()
-
-
-def cmd_upload_flow(file_path: str) -> None:
+def cmd_upload_endpoint(file_path: str) -> None:
     data = _read_json(file_path)
+    path = data.get("path", "")
+    method = (data.get("method") or "GET").upper()
     print(f"\n{_hr()}")
-    print(f"  UPLOAD FLOW")
-    print(f"  File          : {file_path}")
-    print(f"  ID            : {data['flow_id']}  —  {data['title']}")
-    print(f"  Story         : {data.get('story_id', '—')}")
-    print(f"  Features used : {data.get('features_used', [])}")
-    print(f"  Depends on    : {data.get('depends_on', [])}")
+    print(f"  UPLOAD API ENDPOINT")
+    print(f"  File    : {file_path}")
+    print(f"  ID      : {method}:{path}")
     print(_hr())
 
-    result = gs.save_flow(data)
+    result = gs.save_endpoint(data)
     action = "INSERTED (v1)" if result["is_new"] else f"UPDATED  (v{result['version']})"
     print(f"\n  {action}  →  {result['node_id']}")
 
     print("\n  Running relationship mapper...")
-    mapped = mapper.map_on_upload("flow", data["flow_id"])
+    mapped = mapper.map_on_upload("api_endpoint", result["base_id"])
     n = len(mapped["edges_created"])
     print(f"  {n} edge(s) created." if n else "  No matching nodes yet — node stands alone.")
-    if not result["is_new"]:
-        report = impact_analyser.analyse("flow", data["flow_id"])
-        _print_impact_report(report)
-    _print_neo4j_hint(data.get("story_id"))
+    _print_neo4j_hint()
+
+
+def cmd_upload_api(file_path: str) -> None:
+    spec = _read_yaml(file_path)
+    version = spec.get("info", {}).get("version", "?")
+
+    print(f"\n{_hr()}")
+    print(f"  UPLOAD API SPEC  (v{version})")
+    print(f"  File      : {file_path}")
+    print(_hr())
+
+    ingested = ingest_openapi(spec, resync=True)
+    print(f"\n  Endpoints        : {len(ingested['endpoints'])}")
+    print(f"  Response schemas : {len(ingested['response_schemas'])}")
+    print(f"  Edges created    : {len(ingested['edges_created'])}")
+    _print_neo4j_hint()
 
 
 def cmd_upload_testcase(file_path: str) -> None:
     data = _read_json(file_path)
+    data, identity = resolve_item("test_case", data)
     print(f"\n{_hr()}")
     print(f"  UPLOAD TEST CASE")
     print(f"  File    : {file_path}")
-    print(f"  ID      : {data['tc_id']}  —  {data['title']}")
-    print(f"  Flow    : {data.get('flow_id', '—')}")
+    print(f"  ID      : {data['tc_id']}  —  {data['title']}  ({identity.get('identity_source', '')})")
+    print(f"  Linked  : {data.get('linked_to', '—')}")
     print(f"  Type    : {data.get('type', '—')}")
     print(_hr())
 
@@ -218,15 +234,20 @@ def cmd_show_graph(story_base_id: str) -> None:
     print(_hr('═'))
     print(f"\n  📖 UserStory : {story['base_id']}  \"{story['title']}\"")
     print(f"      version  : v{story['version']}")
-    print(f"      valid_at : {story['valid_at'][:19]}")
+    vf = story.get("valid_from") or story.get("valid_at") or ""
+    print(f"      valid_from : {vf[:19]}")
+    flows = story.get("flows") or []
+    print(f"      flows    : {' → '.join(flows) if flows else '(none — run story upload to derive)'}")
 
-    flows = gs.get_connected_flows(story["node_id"])
-    if not flows:
-        print("\n  └── (no flows linked yet)")
+    features = gs.get_features_for_story(story["node_id"])
+    if not features:
+        print("\n  └── (no HAS_FEATURE links yet — upload features)")
     else:
-        for i, flow in enumerate(flows):
-            last_flow = i == len(flows) - 1
-            _print_flow_tree(flow, last_flow)
+        for i, feat in enumerate(features):
+            _print_feature_tree(feat, i == len(features) - 1)
+
+    for tc in gs.get_test_cases_for_entity(story["node_id"]):
+        print(f"\n  📋 TestCase (story): {tc['base_id']}  [{tc.get('type')}]  {tc['title'][:50]}")
 
     print(f"\n{_hr('─')}")
     print(f"  Neo4j query:")
@@ -235,29 +256,18 @@ def cmd_show_graph(story_base_id: str) -> None:
     print(_hr('═'))
 
 
-def _print_flow_tree(flow: dict, is_last: bool) -> None:
+def _print_feature_tree(feat: dict, is_last: bool) -> None:
     branch = "└──" if is_last else "├──"
-    cont   = "    " if is_last else "│   "
-
-    deps = gs.get_depends_on(flow["node_id"])
-    dep_str = f"  ← depends_on: {', '.join(d['base_id'] for d in deps)}" if deps else ""
-
+    cont = "    " if is_last else "│   "
     print(f"\n  │")
-    print(f"  {branch} 🔄 Flow: {flow['base_id']}  \"{flow['title']}\"  "
-          f"v{flow['version']}{dep_str}")
-
-    features = gs.get_connected_features(flow["node_id"])
-    tcs      = gs.get_connected_test_cases(flow["node_id"])
-
-    for feat in features:
-        print(f"  {cont}   ├── 🧩 Feature: {feat['name']}  v{feat['version']}")
-        apis = gs.get_connected_apis(feat["node_id"])
-        for api in apis:
-            print(f"  {cont}   │       └── 🔌 {api['method']}  {api['path']}  v{api['version']}")
-
-    for tc in tcs:
-        print(f"  {cont}   └── 📋 TestCase: {tc['base_id']}  [{tc['type']}]  "
-              f"\"{tc['title'][:45]}\"  v{tc['version']}")
+    print(f"  {branch} 🧩 Feature: {feat['name']}  v{feat['version']}")
+    apis = gs.get_apis_for_feature(feat["node_id"])
+    for j, api in enumerate(apis):
+        ap = "└──" if j == len(apis) - 1 else "├──"
+        params = f"  params={api['params']}" if api.get("params") else ""
+        print(f"  {cont}   {ap} 🔌 {api['method']} {api['path']}{params}")
+    for tc in gs.get_test_cases_for_entity(feat["node_id"]):
+        print(f"  {cont}   └── 📋 {tc['base_id']}  [{tc.get('type')}]  {tc['title'][:40]}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -269,12 +279,11 @@ def cmd_show_history(entity_type: str, base_id: str) -> None:
         "story":    gs.get_user_story_history,
         "feature":  gs.get_feature_history,
         "api":      gs.get_endpoint_history,
-        "flow":     gs.get_flow_history,
         "testcase": gs.get_test_case_history,
     }
     fn = fetchers.get(entity_type)
     if not fn:
-        print(f"  [!] Unknown type. Use: story | feature | api | flow | testcase")
+        print(f"  [!] Unknown type. Use: story | feature | api | testcase")
         return
 
     history = fn(base_id)
@@ -287,9 +296,9 @@ def cmd_show_history(entity_type: str, base_id: str) -> None:
         return
 
     for h in history:
-        valid   = (h.get("valid_at")   or "")[:19]
-        invalid = (h.get("invalid_at") or "now (current)")[:19]
-        marker  = "  ◀ CURRENT" if not h.get("invalid_at") else ""
+        valid   = (h.get("valid_from") or h.get("valid_at") or "")[:19]
+        invalid = (h.get("valid_to") or h.get("invalid_at") or "now (current)")[:19]
+        marker  = "  ◀ CURRENT" if not (h.get("valid_to") or h.get("invalid_at")) else ""
         print(f"  v{h['version']}  {h.get('status',''):<8}  "
               f"{valid}  →  {invalid}{marker}")
 
@@ -317,9 +326,11 @@ def cmd_delta(story_base_id: str) -> None:
     print(f"\n{_hr('═')}")
     print(f"  DELTA REPORT  —  {story_base_id}")
     print(_hr('═'))
-    print(f"  Previous : {prev['node_id']}   valid: {(prev['valid_at'] or '')[:19]}"
-          f"  →  {(prev['invalid_at'] or '')[:19]}")
-    print(f"  Current  : {latest['node_id']}   valid: {(latest['valid_at'] or '')[:19]}  (active)")
+    pv = prev.get("valid_from") or prev.get("valid_at") or ""
+    pt = prev.get("valid_to") or prev.get("invalid_at") or ""
+    lv = latest.get("valid_from") or latest.get("valid_at") or ""
+    print(f"  Previous : {prev['node_id']}   valid_from: {pv[:19]}  →  valid_to: {pt[:19]}")
+    print(f"  Current  : {latest['node_id']}   valid_from: {lv[:19]}  (active)")
 
     # Content diff
     print(f"\n  CONTENT CHANGES")
@@ -397,11 +408,11 @@ def cmd_compare(story_base_id: str) -> None:
     print(f"""
   PASTE IN NEO4J BROWSER TO VISUALISE:
 
-  -- BEFORE  (v{prev['version']}  valid: {(prev['valid_at'] or '')[:19]})
+  -- BEFORE  (v{prev['version']}  valid_from: {pv[:19]})
   MATCH p=(old:UserStory {{node_id:'{prev_node_id}'}})-[*1..6]->(n)
   RETURN p
 
-  -- AFTER   (v{latest['version']}  valid: {(latest['valid_at'] or '')[:19]})
+  -- AFTER   (v{latest['version']}  valid_from: {lv[:19]})
   MATCH p=(new:UserStory {{node_id:'{latest_node_id}'}})-[*1..6]->(n)
   RETURN p
 
@@ -409,11 +420,11 @@ def cmd_compare(story_base_id: str) -> None:
   MATCH p=(us:UserStory {{base_id:'{story_base_id}'}})-[*1..6]->(n)
   RETURN p
 
-  -- EDGE TIMELINE  (shows valid_at / invalid_at on every relationship)
+  -- EDGE TIMELINE  (shows valid_from / valid_to on every relationship)
   MATCH (a)-[r]->(b)
   WHERE a.base_id = '{story_base_id}' OR b.base_id = '{story_base_id}'
-  RETURN a.node_id, type(r), r.valid_at, r.invalid_at, b.node_id
-  ORDER BY r.valid_at
+  RETURN a.node_id, type(r), coalesce(r.valid_from,r.valid_at), coalesce(r.valid_to,r.invalid_at), b.node_id
+  ORDER BY coalesce(r.valid_from,r.valid_at)
 """)
 
     # ── Terminal diff: downstream nodes in v(n-1) vs v(n) ─────────────────
@@ -493,18 +504,19 @@ def cmd_neo4j_query(story_base_id: str) -> None:
     print(_hr())
 
     for v, node_id in sorted(versions.items()):
-        label = "CURRENT" if not history[v-1].get("invalid_at") else f"v{v} (expired)"
+        h = history[v - 1]
+        label = "CURRENT" if not (h.get("valid_to") or h.get("invalid_at")) else f"v{v} (expired)"
         print(f"\n  -- v{v} graph  [{label}]")
         print(f"  MATCH p=(us:UserStory {{node_id:'{node_id}'}})-[*1..6]->(n) RETURN p")
 
     print(f"\n  -- ALL versions together (old + new nodes visible)")
     print(f"  MATCH p=(us:UserStory {{base_id:'{story_base_id}'}})-[*1..6]->(n) RETURN p")
 
-    print(f"\n  -- Edge timeline (valid_at / invalid_at on every relationship)")
+    print(f"\n  -- Edge timeline (valid_from / valid_to on every relationship)")
     print(f"  MATCH (a)-[r]->(b)")
     print(f"  WHERE a.base_id = '{story_base_id}' OR b.base_id = '{story_base_id}'")
-    print(f"  RETURN a.node_id, type(r), r.valid_at, r.invalid_at, b.node_id")
-    print(f"  ORDER BY r.valid_at")
+    print(f"  RETURN a.node_id, type(r), coalesce(r.valid_from,r.valid_at), coalesce(r.valid_to,r.invalid_at), b.node_id")
+    print(f"  ORDER BY coalesce(r.valid_from,r.valid_at)")
     print(_hr())
 
 
@@ -589,6 +601,43 @@ def _print_impact_report(report: dict | None) -> None:
     print(f"  {_hr('─', 58)}")
 
 
+def cmd_extract_flows(story_id: str, mode: str = "full") -> None:
+    import config
+    from services.flow_proposal_store import create_proposal
+
+    if not config.OPENAI_API_KEY:
+        print("  [!] OPENAI_API_KEY not set")
+        return
+    story = gs.get_user_story(story_id)
+    if not story:
+        print(f"  [!] Story '{story_id}' not found")
+        return
+    current = story.get("flows") or []
+    effective = "delta" if current and mode == "delta" else ("delta" if current else "full")
+    print(f"\n{_hr()}\n  EXTRACT FLOWS (LLM)  story={story_id}  mode={effective}\n{_hr()}")
+    proposal = create_proposal(story_id, mode=effective, trigger="manual")
+    print(f"  Proposal : {proposal['proposal_id']}")
+    print(f"  Proposed : {' → '.join(proposal['proposed_flows'])}")
+    if proposal["validation"].get("warnings"):
+        for w in proposal["validation"]["warnings"]:
+            print(f"  [warn] {w}")
+    print(f"\n  Commit: python main.py commit-flows {proposal['proposal_id']}")
+
+
+def cmd_commit_flows(proposal_id: str) -> None:
+    from services.flow_proposal_store import commit_proposal
+
+    print(f"\n{_hr()}\n  COMMIT FLOW PROPOSAL  {proposal_id}\n{_hr()}")
+    try:
+        result = commit_proposal(proposal_id)
+    except ValueError as e:
+        print(f"  [!] {e}")
+        return
+    print(f"  Story   : {result['story_id']}  →  {result['node_id']}")
+    print(f"  Flows   : {' → '.join(result['flows'])}")
+    print(f"  Edges   : {len(result['edges_created'])} created")
+
+
 def _print_neo4j_hint(story_id: str | None = None) -> None:
     print()
     if story_id:
@@ -606,20 +655,23 @@ Aravinda Knowledge Graph Demo
 
 SETUP
   python main.py setup-schema
+  python main.py setup-tracking   # requires DATABASE_URL in .env
 
 UPLOAD  (any entity, any order, any time)
   python main.py upload-story    sample_data/stories/story_v1.json
   python main.py upload-feature  sample_data/features/feature_login.json
   python main.py upload-api      sample_data/api/spec_v1.yaml
-  python main.py upload-flow     sample_data/flows/f1_login.json
-  python main.py upload-testcase sample_data/testcases/TC-f1-001.json
+  python main.py upload-testcase sample_data/testcases/TC-login-001.json
+
+FLOWS  (LLM — story.flows[], not separate files)
+  python main.py extract-flows US1              # create proposal (delta if flows exist)
+  python main.py commit-flows prop-abc12345     # approve + write to Neo4j
 
 QUERY
   python main.py show-graph    US1
   python main.py show-history  story    US1
   python main.py show-history  feature  Login
-  python main.py show-history  flow     f1
-  python main.py show-history  testcase TC-f1-001
+  python main.py show-history  testcase TC-login-001
 
 DELTA  (after uploading a v2 of any entity)
   python main.py delta US1
@@ -643,14 +695,16 @@ def main() -> None:
     match cmd:
         case "setup-schema":
             cmd_setup_schema()
+        case "setup-tracking":
+            cmd_setup_tracking()
         case "upload-story" if len(args) == 2:
             cmd_upload_story(args[1])
         case "upload-feature" if len(args) == 2:
             cmd_upload_feature(args[1])
+        case "upload-endpoint" if len(args) == 2:
+            cmd_upload_endpoint(args[1])
         case "upload-api" if len(args) == 2:
             cmd_upload_api(args[1])
-        case "upload-flow" if len(args) == 2:
-            cmd_upload_flow(args[1])
         case "upload-testcase" if len(args) == 2:
             cmd_upload_testcase(args[1])
         case "show-graph" if len(args) == 2:
@@ -663,6 +717,11 @@ def main() -> None:
             cmd_neo4j_query(args[1])
         case "compare" if len(args) == 2:
             cmd_compare(args[1])
+        case "extract-flows" if len(args) >= 2:
+            mode = args[2] if len(args) > 2 else "full"
+            cmd_extract_flows(args[1], mode)
+        case "commit-flows" if len(args) == 2:
+            cmd_commit_flows(args[1])
         case _:
             print(f"  [!] Unknown command: {' '.join(args)}")
             print(USAGE)

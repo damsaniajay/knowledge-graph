@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "path": "/support/tickets",
+  "summary": "List open support tickets for the logged-in customer",
+  "request_schema": {}
+}

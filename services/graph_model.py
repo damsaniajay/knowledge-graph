@@ -1,0 +1,35 @@
+"""Canonical graph model — aligned with KnowledgeGraph_Schema reference."""
+
+NODE_LABELS = (
+    "UserStory",
+    "Feature",
+    "APIEndpoint",
+    "APIResponseSchema",
+    "TestCase",
+)
+
+REL_HAS_FEATURE = "HAS_FEATURE"
+REL_USES_API = "USES_API"
+REL_HAS_TEST_CASE = "HAS_TEST_CASE"
+REL_DEPENDS_ON = "DEPENDS_ON"
+REL_DEPENDENCY = "DEPENDENCY"  # TestCase: prerequisite → dependent (impact analysis)
+REL_BLOCKS = "BLOCKS"
+REL_HAS_RESPONSE_SCHEMA = "HAS_RESPONSE_SCHEMA"
+REL_VALIDATES_AGAINST = "VALIDATES_AGAINST"
+REL_PREVIOUS_VERSION = "PREVIOUS_VERSION"
+
+VALID_REL_TYPES = {
+    REL_HAS_FEATURE,
+    REL_USES_API,
+    REL_HAS_TEST_CASE,
+    REL_DEPENDS_ON,
+    REL_DEPENDENCY,
+    REL_BLOCKS,
+    REL_HAS_RESPONSE_SCHEMA,
+    REL_VALIDATES_AGAINST,
+    REL_PREVIOUS_VERSION,
+}
+
+DEFAULT_COUPLING = "tight"
+DEFAULT_STATUS = "active"
+STATUS_ARCHIVED = "archived"

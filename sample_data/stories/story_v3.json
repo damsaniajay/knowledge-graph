@@ -1,0 +1,6 @@
+{
+  "title": "Plan Change",
+  "content": "As a subscriber, I want to change my current mobile plan so that I can get better benefits. The user must call POST /auth/login with OTP to authenticate, use GET /analytics/usage for usage insights, use GET /plans for current and recommended offers, and POST /plans/switch with optional promo_code to select a new plan. Billing and payment are deferred to a separate release.",
+  "depends_on": [],
+  "blocked_by": []
+}

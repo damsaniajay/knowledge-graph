@@ -1,0 +1,11 @@
+{
+  "linked_to": "Payment",
+  "title": "Successful payment and plan activation",
+  "type": "positive",
+  "test_layer": "api",
+  "steps": [
+    "POST /payments/pay",
+    "POST /payments/activate"
+  ],
+  "expected_result": "HTTP 200 \u2014 payment processed and plan activated"
+}

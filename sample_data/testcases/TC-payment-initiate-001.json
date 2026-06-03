@@ -1,0 +1,15 @@
+{
+  "tc_id": "TC-payment-initiate-001",
+  "linked_to": "PaymentInitiate",
+  "depends_on_test_cases": [
+    "TC-planswitch-001"
+  ],
+  "title": "Initiate OTP payment after plan switch",
+  "type": "positive",
+  "test_layer": "api",
+  "steps": [
+    "Ensure valid switch order exists from POST /plans/switch",
+    "Call POST /payments/initiate with order_id and payment_method"
+  ],
+  "expected_result": "HTTP 200 — payment initiated and OTP generated"
+}
