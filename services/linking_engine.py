@@ -206,6 +206,22 @@ def _flow_depends_pairs(flows: list) -> set[tuple[str, str]]:
     }
 
 
+def _feature_depends_pairs(flows: list) -> set[tuple[str, str]]:
+    """Declared Feature.depends_on pairs for features that are part of this story flow."""
+    allowed = _flow_feature_node_ids(flows)
+    pairs: set[tuple[str, str]] = set()
+    for feature in _resolve_flow_features(flows):
+        dependent = feature.get("node_id")
+        if not dependent or dependent not in allowed:
+            continue
+        for dep in feature.get("depends_on") or []:
+            other = gs.get_feature(dep) or gs.get_feature_by_name(dep)
+            prerequisite = (other or {}).get("node_id")
+            if prerequisite and prerequisite in allowed and prerequisite != dependent:
+                pairs.add((dependent, prerequisite))
+    return pairs
+
+
 def _delete_all_feature_next_step_edges() -> None:
     """Remove legacy workflow NEXT_STEP edges between features (schema uses DEPENDS_ON only)."""
     with gs._get_driver().session() as session:
@@ -220,7 +236,7 @@ def _rebuild_flow_depends_on_from_story_order(flows: list) -> None:
     """
     _delete_all_feature_next_step_edges()
     allowed = _flow_feature_node_ids(flows)
-    expected = _flow_depends_pairs(flows)
+    expected = _flow_depends_pairs(flows) | _feature_depends_pairs(flows)
 
     with gs._get_driver().session() as session:
         for row in session.run(

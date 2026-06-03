@@ -707,9 +707,9 @@ async function fetchGraphCached({ force = false } = {}) {
   return cloneGraph(graph);
 }
 
-function applyStoryVersionDelta(delta, impactOverride = null) {
+function applyStoryVersionDelta(delta, impactOverride = undefined) {
   const banner = $("storyDeltaBanner");
-  const impact = impactOverride || currentStoryImpact();
+  const impact = impactOverride === undefined ? currentStoryImpact() : impactOverride;
   renderImpactSidebar(impact);
   if (!cy) return;
 
@@ -1370,7 +1370,7 @@ function applyGraph(graph, newNodeId = null) {
   }
   applyStoryVersionDelta(
     lastStoryFlowDelta,
-    graph.story_upload_impact || currentStoryImpact(),
+    graph.story_upload_impact || null,
   );
   if (focusNodeId) focusStoryView(focusNodeId);
 
@@ -1805,12 +1805,10 @@ $("editForm").addEventListener("submit", async (e) => {
 $("storySelect").addEventListener("change", async () => {
   const sid = $("storySelect").value;
   if (sid) sessionStorage.setItem("kg_story_focus", sid);
-  else {
-    sessionStorage.removeItem("kg_story_focus");
-    lastUploadImpact = null;
-    lastUploadImpactStoryId = null;
-    renderImpactSidebar(null);
-  }
+  else sessionStorage.removeItem("kg_story_focus");
+  lastUploadImpact = null;
+  lastUploadImpactStoryId = null;
+  renderImpactSidebar(null);
   clearStoryFocus();
   try {
     await refreshGraph(null, { loadingLabel: "Switching story…" });

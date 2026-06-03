@@ -1573,44 +1573,54 @@ def _collect_subgraph_node_ids(
     *,
     flow_feature_ids: set[str] | None = None,
 ) -> set[str]:
-    """BFS from one story version; only features in flow_feature_ids are expanded when set."""
+    """
+    Collect one story-version snapshot without walking impact-only branches.
+
+    DEPENDENCY edges are useful for impact traversal, but expanding through them here
+    makes archived story views absorb unrelated/future dependent test cases.
+    """
     ids = {i for i in seed_ids if i}
-    allowed_stories = set(ids)
-    frontier = set(ids)
-    rels = _STORY_SUBGRAPH_RELS
-    while frontier:
-        rows = session.run(
-            """
-            MATCH (a)-[r]-(b)
-            WHERE a.node_id IN $frontier AND type(r) IN $rels
-              AND NOT b:APIResponseSchema
-              AND any(l IN labels(b) WHERE l IN ['UserStory','Feature','APIEndpoint','TestCase'])
-            RETURN DISTINCT b.node_id AS id, labels(b)[0] AS label
-            """,
-            frontier=list(frontier),
-            rels=rels,
-        )
-        next_frontier: set[str] = set()
-        for row in rows:
-            nid = row["id"]
-            if not nid or nid in ids:
-                continue
-            if row["label"] == "UserStory" and nid not in allowed_stories:
-                continue
-            if row["label"] == "Feature" and flow_feature_ids is not None:
-                if nid not in flow_feature_ids:
-                    continue
-            ids.add(nid)
-            next_frontier.add(nid)
-        if not next_frontier:
-            break
-        frontier = next_frontier
+    feature_ids = set(flow_feature_ids or [])
+    ids |= feature_ids
+
+    if not seed_ids:
+        return ids
+
+    story_node_id = seed_ids[0]
+
+    for row in session.run(
+        """
+        MATCH (:UserStory {node_id:$story})-[:USES_API]->(api:APIEndpoint)
+        RETURN api.node_id AS id
+        UNION
+        MATCH (f:Feature)-[:USES_API]->(api:APIEndpoint)
+        WHERE f.node_id IN $feature_ids
+        RETURN api.node_id AS id
+        """,
+        story=story_node_id,
+        feature_ids=list(feature_ids),
+    ):
+        if row["id"]:
+            ids.add(row["id"])
+
+    for row in session.run(
+        """
+        MATCH (owner)-[:HAS_TEST_CASE]->(tc:TestCase)
+        WHERE owner.node_id IN $owner_ids
+        RETURN DISTINCT tc.node_id AS id
+        """,
+        owner_ids=list(ids),
+    ):
+        if row["id"]:
+            ids.add(row["id"])
+
     return ids
 
 
 def get_story_subgraph(story_node_id: str) -> dict:
     """Only nodes and edges for one UserStory version's flows[] (removed features = standalone)."""
     from services.linking_engine import (
+        _feature_depends_pairs,
         _flow_depends_pairs,
         _flow_feature_node_ids,
     )
@@ -1746,7 +1756,11 @@ def _prepare_full_graph_flow_context(session) -> tuple[dict, set[str], set[tuple
 
     Used by All nodes view: live v2 has no Payment links; v1 archived may still show Payment.
     """
-    from services.linking_engine import _flow_depends_pairs, _flow_feature_node_ids
+    from services.linking_engine import (
+        _feature_depends_pairs,
+        _flow_depends_pairs,
+        _flow_feature_node_ids,
+    )
 
     flows_by_story: dict[str, set[str]] = {}
     live_feature_ids: set[str] = set()
@@ -1762,7 +1776,7 @@ def _prepare_full_graph_flow_context(session) -> tuple[dict, set[str], set[tuple
         flows_by_story[story_nid] = fids
         if row["is_current"]:
             live_feature_ids |= fids
-            live_flow_depends |= _flow_depends_pairs(flows)
+            live_flow_depends |= _flow_depends_pairs(flows) | _feature_depends_pairs(flows)
 
     return flows_by_story, live_feature_ids, live_flow_depends
 
