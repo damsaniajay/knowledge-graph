@@ -354,6 +354,17 @@ def _analyse_api_endpoint(base_id: str) -> dict | None:
     features = gs.get_features_using_api(base_id)
 
     impacted_tcs: dict[str, dict] = {}
+    if ":" in base_id:
+        method, path = base_id.split(":", 1)
+        endpoint = gs.get_endpoint_by_path(path, method)
+        if endpoint:
+            for tc in gs.get_test_cases_for_entity(endpoint["node_id"]):
+                impacted_tcs[tc["node_id"]] = _tc_payload(
+                    tc,
+                    reason=f"API {base_id} contract changed",
+                    impact_category="api_contract",
+                )
+
     for feat in features:
         for tc in gs.get_test_cases_for_entity(feat["node_id"]):
             impacted_tcs[tc["node_id"]] = _tc_payload(

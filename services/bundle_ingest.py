@@ -50,18 +50,21 @@ def process_bundle(
         )
 
     tc_count = 0
+    test_case_ids: list[str] = []
     for raw_tc in test_cases:
         tc = dict(raw_tc)
         if tc.get("flow_id") and not tc.get("linked_to"):
             tc["linked_to"] = tc["flow_id"]
         item, _meta = resolve_upload_items("test_case", [tc])
         gs.save_test_case(item[0], version_policy=version_policy)
+        test_case_ids.append(item[0]["tc_id"])
         tc_count += 1
 
     story_ids = [r["story_id"] for r in story_results if r.get("story_id")]
     edges = mapper.resync_graph(
         story_base_ids=story_ids,
         feature_base_ids=feature_ids,
+        test_case_base_ids=test_case_ids,
     )
 
     primary = story_results[0] if story_results else {}
