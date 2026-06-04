@@ -350,5 +350,10 @@ user_story:
     GET /plans to view current and recommended plans, POST /plans/switch to select
     a new plan, then POST /payments/pay and POST /payments/activate to complete payment
     and activation.
+  flows:
+  - Login
+  - PlanFetch
+  - PlanSwitch
+  - Payment
   depends_on: []
   blocked_by: []

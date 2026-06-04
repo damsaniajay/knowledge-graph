@@ -1,0 +1,10 @@
+flowchart BT
+  Login
+  PlanFetch --> Login
+  PlanSwitch --> PlanFetch
+  PaymentInitiate --> PlanSwitch
+  PaymentVerifyOtp --> PaymentInitiate
+  PlanActivate --> PaymentVerifyOtp
+  SupportTicket --> Login
+  ProfileView --> Login
+  VASOverview --> Login

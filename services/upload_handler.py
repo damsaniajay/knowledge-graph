@@ -157,7 +157,12 @@ def process_upload(
                     )
                     mapper.resync_graph(full=True)
         elif entity_type == "test_case" and base_id:
-            edges_total = mapper.resync_graph(test_case_base_ids=[base_id])
+            tc = gs.get_test_case(base_id)
+            story_ids = mapper.story_base_ids_for_test_case(tc) if tc else []
+            edges_total = mapper.resync_graph(
+                story_base_ids=story_ids,
+                test_case_base_ids=[base_id],
+            )
         elif entity_type == "api_endpoint" and base_id:
             edges_total = mapper.resync_graph(full=True)
             if effective_version_policy == "deprecate":

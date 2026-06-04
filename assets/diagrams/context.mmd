@@ -1,0 +1,7 @@
+flowchart TB
+  SUB[Subscriber app]
+  API[Plan Change API]
+  PAY[Payment gateway]
+
+  SUB -->|HTTPS REST| API
+  API -->|charge| PAY

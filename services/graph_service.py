@@ -1676,7 +1676,7 @@ def get_story_subgraph(story_node_id: str) -> dict:
                 "properties": _serialize_props(props),
             })
 
-        flow_depends = _flow_depends_pairs(flows)
+        allowed_feature_depends = _flow_depends_pairs(flows) | _feature_depends_pairs(flows)
 
         if seen_n:
             for row in session.run(
@@ -1694,7 +1694,7 @@ def get_story_subgraph(story_node_id: str) -> dict:
                 if rel == "DEPENDS_ON" and row["sa"] == "Feature" and row["sb"] == "Feature":
                     if src not in flow_feature_ids or tgt not in flow_feature_ids:
                         continue
-                    if (src, tgt) not in flow_depends:
+                    if (src, tgt) not in allowed_feature_depends:
                         continue
                 if rel == "HAS_FEATURE" and row["sa"] == "UserStory":
                     if tgt not in flow_feature_ids:

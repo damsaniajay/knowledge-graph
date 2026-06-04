@@ -98,11 +98,14 @@ def _resync_scoped(
             tc = gs.get_test_case(tc_id)
             if tc:
                 edges.extend(_link_test_case_relationships(tc))
+                for bid in story_base_ids_for_test_case(tc):
+                    seen_stories.add(bid)
     else:
         for tc in gs.get_all_test_cases():
             edges.extend(_link_test_case_relationships(tc))
 
     edges.extend(_ensure_test_case_dependency_mirrors())
+    _finalize_feature_depends_for_stories(seen_stories)
     return edges
 
 
@@ -128,6 +131,9 @@ def _resync_graph() -> list:
         edges.extend(_link_test_case_relationships(tc))
 
     edges.extend(_ensure_test_case_dependency_mirrors())
+    _finalize_feature_depends_for_stories(
+        {s["base_id"] for s in gs.get_all_user_stories() if s.get("base_id")}
+    )
     return edges
 
 
@@ -204,6 +210,30 @@ def _flow_depends_pairs(flows: list) -> set[tuple[str, str]]:
         (resolved[i]["node_id"], resolved[i - 1]["node_id"])
         for i in range(1, len(resolved))
     }
+
+
+def _finalize_feature_depends_for_stories(story_base_ids: set[str] | list[str]) -> None:
+    """Rebuild Feature DEPENDS_ON after scoped relink (story + feature passes)."""
+    for bid in story_base_ids:
+        if not bid:
+            continue
+        story = gs.get_user_story(bid)
+        if not story:
+            continue
+        flows = list(story.get("flows") or [])
+        if flows:
+            _rebuild_flow_depends_on_from_story_order(flows)
+
+
+def story_base_ids_for_test_case(tc: dict) -> list[str]:
+    """Stories whose flows[] include the feature (or API) this test case links to."""
+    linked = (tc.get("linked_to") or "").strip()
+    if not linked:
+        return []
+    feat = gs.get_feature(linked) or gs.get_feature_by_name(linked)
+    if feat:
+        return find_story_base_ids_for_feature(feat)
+    return []
 
 
 def _feature_depends_pairs(flows: list) -> set[tuple[str, str]]:

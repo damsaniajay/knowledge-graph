@@ -1,0 +1,9 @@
+flowchart BT
+  Login
+  PlanFetch --> Login
+  EligibilityCheck --> PlanFetch
+  PlanSwitch --> EligibilityCheck
+  Payment --> PlanSwitch
+  SupportTicket --> Login
+  ProfileView --> Login
+  VASOverview --> Login

@@ -1,0 +1,6 @@
+flowchart LR
+  Login --> PlanFetch
+  PlanFetch --> PlanSwitch
+  PlanSwitch --> PaymentInitiate
+  PaymentInitiate --> PaymentVerifyOtp
+  PaymentVerifyOtp --> PlanActivate
